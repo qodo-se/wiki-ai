@@ -1,0 +1,14 @@
+services:
+  api:
+    build: ./backend
+    hostname: wiki
+    volumes:
+      - ./static:/app/static:ro
+      - wiki-data:/data
+    environment:
+      - HOST=0.0.0.0
+    ports:
+      - "8081:80"
+
+volumes:
+  wiki-data:
