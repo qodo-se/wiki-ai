@@ -51,3 +51,11 @@ def put_note(uuid: str, body: NoteBody):
             (uuid, body.content),
         )
     return {"id": uuid}
+
+
+@router.delete("/{uuid}", status_code=204)
+def delete_note(uuid: str):
+    with connect() as db:
+        cursor = db.execute("DELETE FROM notes WHERE id = ?", (uuid,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="note not found")

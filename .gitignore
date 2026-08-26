@@ -1,6 +1,12 @@
 # .dev is where you can store local files
 .dev/
 
+# Local Claude Code planning files (not shared/committed)
+.claude/projects/
+
+# Local Qodo CLI session context/review output (not shared/committed)
+.qodo/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

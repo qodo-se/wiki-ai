@@ -6,6 +6,7 @@ const CLS = {
     headerRow: 'flex justify-between items-center gap-3 max-w-[1200px] mx-auto mb-5',
     h2: 'm-0 text-xl sm:text-2xl text-gray-800 truncate min-w-0',
     primaryBtn: 'shrink-0 px-4 sm:px-6 py-2 sm:py-2.5 bg-black text-white text-sm sm:text-base font-semibold rounded-md hover:bg-gray-800 transition-colors',
+    dangerBtn: 'shrink-0 px-4 sm:px-6 py-2 sm:py-2.5 bg-white text-red-600 text-sm sm:text-base font-semibold rounded-md border border-red-200 hover:bg-red-50 transition-colors',
     list: 'max-w-[1200px] mx-auto list-none p-0 space-y-3',
     item: 'flex flex-col sm:flex-row sm:justify-between sm:items-center gap-1 sm:gap-4 px-4 py-3 sm:px-5 sm:py-4 bg-white rounded-lg shadow-sm',
     itemLink: 'text-gray-800 font-medium hover:text-black hover:underline truncate',
@@ -73,6 +74,7 @@ function renderNote(noteId) {
     app.innerHTML = `
         <div class="${CLS.headerRow}">
             <h2 id="note-title" class="${CLS.h2} flex-1">${escapeHtml(noteId)}</h2>
+            <button id="delete-btn" class="${CLS.dangerBtn}">Delete</button>
             <button id="save-btn" class="${CLS.primaryBtn}">Save Note</button>
         </div>
         <div id="editor-container" class="${CLS.editor}"></div>
@@ -98,7 +100,11 @@ function renderNote(noteId) {
         .catch(() => editor.setMarkdown('# Error\n\nCould not load this note.'));
 
     const saveBtn = document.getElementById('save-btn');
+    const deleteBtn = document.getElementById('delete-btn');
+
     saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        deleteBtn.disabled = true;
         try {
             const res = await fetch(apiUrl, {
                 method: 'PUT',
@@ -110,6 +116,24 @@ function renderNote(noteId) {
             setTimeout(() => { saveBtn.textContent = 'Save Note'; }, 1200);
         } catch (err) {
             alert('Save failed: ' + err.message);
+        } finally {
+            saveBtn.disabled = false;
+            deleteBtn.disabled = false;
+        }
+    });
+
+    deleteBtn.addEventListener('click', async () => {
+        if (!confirm('Delete this note? This cannot be undone.')) return;
+        saveBtn.disabled = true;
+        deleteBtn.disabled = true;
+        try {
+            const res = await fetch(apiUrl, { method: 'DELETE' });
+            if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
+            window.location.href = '/';
+        } catch (err) {
+            saveBtn.disabled = false;
+            deleteBtn.disabled = false;
+            alert('Delete failed: ' + err.message);
         }
     });
 }
