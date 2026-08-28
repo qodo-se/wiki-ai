@@ -23,6 +23,10 @@ package, which stops parsing at the first non-flag argument) — e.g.
 # list recent notes
 ./wiki-cli list --limit 20
 
+# page through all notes — each page prints a "next page: --offset N" hint
+# once there are more notes beyond the current page
+./wiki-cli list --limit 20 --offset 20
+
 # create a note from a file, at a given path — the server allocates the id
 # and prints it (the CLI never picks its own id)
 ./wiki-cli create --path /docs/setup --file notes.md

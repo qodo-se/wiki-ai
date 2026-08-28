@@ -57,6 +57,10 @@ Commands:
   delete <uuid>        delete a note
   search <query>       search notes
 
+list flags:
+  --limit int    max number of notes to return per page (default 10)
+  --offset int   number of notes to skip, for paging (default 0)
+
 Global flags (accepted by every command):
   --url string   base URL of the wiki API (default "http://localhost:8081",
                  or $WIKI_URL if set)
@@ -95,17 +99,38 @@ func readContent(path string) (string, error) {
 
 func runList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	limit := fs.Int("limit", 10, "max number of notes to return")
+	limit := fs.Int("limit", 10, "max number of notes to return per page")
+	offset := fs.Int("offset", 0, "number of notes to skip (for paging)")
 	urlFlag := addURLFlag(fs)
 	fs.Parse(args)
 	url := *urlFlag
 
-	notes, err := newClient(url).listNotes(*limit)
+	if *offset < 0 {
+		fmt.Fprintln(os.Stderr, "error: --offset must be >= 0")
+		os.Exit(1)
+	}
+
+	list, err := newClient(url).listNotes(*limit, *offset)
 	if err != nil {
 		fail(err)
 	}
-	for _, n := range notes {
+	for _, n := range list.Items {
 		fmt.Printf("%s  %-30s %-20s %s\n", sanitizeForTerminal(n.ID), sanitizeForTerminal(n.Title), sanitizeForTerminal(n.Path), n.CreatedAt)
+	}
+
+	if list.Total == 0 {
+		fmt.Println("no notes")
+		return
+	}
+	if len(list.Items) == 0 {
+		fmt.Printf("no notes at offset %d (%d total) — try a smaller --offset\n", list.Offset, list.Total)
+		return
+	}
+	shownFrom := list.Offset + 1
+	shownTo := list.Offset + len(list.Items)
+	fmt.Printf("showing %d-%d of %d\n", shownFrom, shownTo, list.Total)
+	if shownTo < list.Total {
+		fmt.Printf("next page: --offset %d\n", list.Offset+*limit)
 	}
 }
 

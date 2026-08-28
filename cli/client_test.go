@@ -12,12 +12,12 @@ func TestNewClientTrimsTrailingSlash(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		w.Write([]byte("[]"))
+		w.Write([]byte(`{"items":[],"total":0,"limit":10,"offset":0}`))
 	}))
 	defer srv.Close()
 
 	c := newClient(srv.URL + "/")
-	if _, err := c.listNotes(10); err != nil {
+	if _, err := c.listNotes(10, 0); err != nil {
 		t.Fatalf("listNotes: %v", err)
 	}
 	if gotPath != "/api/v1/notes" {
@@ -36,16 +36,27 @@ func TestListNotesRequest(t *testing.T) {
 		if got := r.URL.Query().Get("limit"); got != "5" {
 			t.Errorf("limit = %s, want 5", got)
 		}
-		json.NewEncoder(w).Encode([]noteSummary{{ID: "abc", Title: "hi"}})
+		if got := r.URL.Query().Get("offset"); got != "15" {
+			t.Errorf("offset = %s, want 15", got)
+		}
+		json.NewEncoder(w).Encode(noteListResponse{
+			Items:  []noteSummary{{ID: "abc", Title: "hi"}},
+			Total:  42,
+			Limit:  5,
+			Offset: 15,
+		})
 	}))
 	defer srv.Close()
 
-	notes, err := newClient(srv.URL).listNotes(5)
+	list, err := newClient(srv.URL).listNotes(5, 15)
 	if err != nil {
 		t.Fatalf("listNotes: %v", err)
 	}
-	if len(notes) != 1 || notes[0].ID != "abc" {
-		t.Fatalf("unexpected notes: %+v", notes)
+	if len(list.Items) != 1 || list.Items[0].ID != "abc" {
+		t.Fatalf("unexpected items: %+v", list.Items)
+	}
+	if list.Total != 42 || list.Limit != 5 || list.Offset != 15 {
+		t.Fatalf("unexpected pagination fields: %+v", list)
 	}
 }
 
@@ -235,7 +246,7 @@ func TestNon2xxReturnsAPIError(t *testing.T) {
 
 func TestTransportErrorIsReturned(t *testing.T) {
 	c := newClient("http://127.0.0.1:0")
-	if _, err := c.listNotes(1); err == nil {
+	if _, err := c.listNotes(1, 0); err == nil {
 		t.Fatal("expected a transport error connecting to an invalid address")
 	}
 }

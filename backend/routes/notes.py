@@ -32,18 +32,31 @@ class NoteMeta(BaseModel):
     updated_at: str
 
 
-@router.get("", response_model=list[NoteSummary])
-def list_notes(limit: int = Query(10, ge=1, le=100)):
+class NoteListResponse(BaseModel):
+    items: list[NoteSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("", response_model=NoteListResponse)
+def list_notes(limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0)):
     with connect() as db:
+        # BEGIN so both reads share one snapshot — otherwise a concurrent
+        # create/delete between the two statements can make `total` disagree
+        # with `items`, producing an impossible page for the caller.
+        db.execute("BEGIN")
+        total = db.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
         rows = db.execute(
             "SELECT id, title, path, substr(content, 1, 120) AS preview, created_at "
-            "FROM notes ORDER BY created_at DESC LIMIT ?",
-            (limit,),
+            "FROM notes ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
-    return [
+    items = [
         NoteSummary(id=r[0], title=r[1], path=r[2], preview=r[3], created_at=r[4])
         for r in rows
     ]
+    return NoteListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/{uuid}", response_class=PlainTextResponse)

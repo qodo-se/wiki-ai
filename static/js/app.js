@@ -26,7 +26,12 @@ const CLS = {
     toggleBtnActive: 'bg-black text-white border-black',
     toggleBtnInactive: 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100',
     groupHeading: 'max-w-[1200px] mx-auto mt-6 mb-2 px-1 text-xs font-semibold text-gray-500 uppercase tracking-wide font-mono first:mt-0',
+    pagination: 'max-w-[1200px] mx-auto mt-5 flex justify-between items-center gap-3',
+    pageInfo: 'text-gray-500 text-sm',
+    pageBtn: 'px-3 py-1.5 text-sm font-medium rounded-md border bg-white text-gray-700 border-gray-300 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white',
 };
+
+const PAGE_SIZE = 10;
 
 function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => (
@@ -94,6 +99,11 @@ async function renderHome() {
             <button id="view-path-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnInactive}">By Path</button>
         </div>
         <div id="recent-notes" class="${CLS.list}"></div>
+        <div class="${CLS.pagination}">
+            <button id="prev-page-btn" class="${CLS.pageBtn}">Prev</button>
+            <span id="page-info" class="${CLS.pageInfo}"></span>
+            <button id="next-page-btn" class="${CLS.pageBtn}">Next</button>
+        </div>
     `;
 
     document.getElementById('new-note-btn').addEventListener('click', async (e) => {
@@ -117,8 +127,14 @@ async function renderHome() {
     const list = document.getElementById('recent-notes');
     const titleBtn = document.getElementById('view-title-btn');
     const pathBtn = document.getElementById('view-path-btn');
+    const prevBtn = document.getElementById('prev-page-btn');
+    const nextBtn = document.getElementById('next-page-btn');
+    const pageInfo = document.getElementById('page-info');
     let mode = 'title';
     let notes = [];
+    let offset = 0;
+    let total = 0;
+    let currentReqId = 0;
 
     function setMode(next) {
         mode = next;
@@ -127,17 +143,48 @@ async function renderHome() {
         renderNoteList(list, notes, mode);
     }
 
+    async function loadPage(nextOffset) {
+        const reqId = ++currentReqId;
+        try {
+            const res = await fetch(`/api/v1/notes?limit=${PAGE_SIZE}&offset=${nextOffset}`);
+            if (reqId !== currentReqId) return; // stale — a newer page request won the race
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const data = await res.json();
+            if (reqId !== currentReqId) return; // stale
+
+            // Requested page is past the last valid one (e.g. notes were
+            // deleted elsewhere since the last load) — clamp back instead of
+            // rendering an impossible "11-10 of 10" range.
+            if (data.items.length === 0 && data.total > 0 && data.offset > 0) {
+                const lastPageOffset = Math.floor((data.total - 1) / PAGE_SIZE) * PAGE_SIZE;
+                if (lastPageOffset !== data.offset) return loadPage(lastPageOffset);
+            }
+
+            notes = data.items;
+            offset = data.offset;
+            total = data.total;
+            renderNoteList(list, notes, mode);
+
+            const shownFrom = total === 0 ? 0 : offset + 1;
+            const shownTo = offset + notes.length;
+            pageInfo.textContent = total === 0 ? 'No notes' : `${shownFrom}–${shownTo} of ${total}`;
+            prevBtn.disabled = offset === 0;
+            nextBtn.disabled = shownTo >= total;
+        } catch (err) {
+            if (reqId !== currentReqId) return; // stale
+            list.innerHTML = `<div class="${CLS.error}">Failed to load notes: ${escapeHtml(err.message)}</div>`;
+            pageInfo.textContent = '';
+            prevBtn.disabled = true;
+            nextBtn.disabled = true;
+        }
+    }
+
     titleBtn.addEventListener('click', () => setMode('title'));
     pathBtn.addEventListener('click', () => setMode('path'));
+    prevBtn.addEventListener('click', () => loadPage(Math.max(0, offset - PAGE_SIZE)));
+    nextBtn.addEventListener('click', () => loadPage(offset + PAGE_SIZE));
 
-    try {
-        const res = await fetch('/api/v1/notes');
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        notes = await res.json();
-        renderNoteList(list, notes, mode);
-    } catch (err) {
-        list.innerHTML = `<div class="${CLS.error}">Failed to load notes: ${escapeHtml(err.message)}</div>`;
-    }
+    await loadPage(0);
 }
 
 async function renderNote(noteId) {

@@ -93,18 +93,26 @@ type searchHit struct {
 	CreatedAt string `json:"created_at"`
 }
 
-func (c *client) listNotes(limit int) ([]noteSummary, error) {
+type noteListResponse struct {
+	Items  []noteSummary `json:"items"`
+	Total  int           `json:"total"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
+}
+
+func (c *client) listNotes(limit, offset int) (*noteListResponse, error) {
 	body, err := c.do(http.MethodGet, "/api/v1/notes", url.Values{
-		"limit": {fmt.Sprint(limit)},
+		"limit":  {fmt.Sprint(limit)},
+		"offset": {fmt.Sprint(offset)},
 	}, nil)
 	if err != nil {
 		return nil, err
 	}
-	var notes []noteSummary
-	if err := json.Unmarshal(body, &notes); err != nil {
+	var list noteListResponse
+	if err := json.Unmarshal(body, &list); err != nil {
 		return nil, err
 	}
-	return notes, nil
+	return &list, nil
 }
 
 func (c *client) getNoteContent(id string) (string, error) {
