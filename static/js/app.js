@@ -96,8 +96,22 @@ async function renderHome() {
         <div id="recent-notes" class="${CLS.list}"></div>
     `;
 
-    document.getElementById('new-note-btn').addEventListener('click', () => {
-        window.location.href = '/notes/' + crypto.randomUUID();
+    document.getElementById('new-note-btn').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        try {
+            const res = await fetch('/api/v1/notes', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: DEFAULT_MARKDOWN, path: '/' })
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const { id } = await res.json();
+            window.location.href = '/notes/' + encodeURIComponent(id);
+        } catch (err) {
+            btn.disabled = false;
+            alert('Could not create note: ' + err.message);
+        }
     });
 
     const list = document.getElementById('recent-notes');
@@ -126,7 +140,31 @@ async function renderHome() {
     }
 }
 
-function renderNote(noteId) {
+async function renderNote(noteId) {
+    const apiUrl = '/api/v1/notes/' + encodeURIComponent(noteId);
+
+    // Notes are only ever created server-side (via the "New note" button's
+    // POST), so a 404 here means this id doesn't exist — show that instead
+    // of a silently-editable blank note whose Save would just 404 too.
+    let initialContent;
+    try {
+        const res = await fetch(apiUrl);
+        if (res.status === 404) {
+            app.innerHTML = `
+                <div class="${CLS.headerRow}">
+                    <h2 class="${CLS.h2} flex-1">${escapeHtml(noteId)}</h2>
+                </div>
+                <div class="${CLS.error}">This note doesn't exist. <a href="/">Go home</a> to create a new one.</div>
+            `;
+            return;
+        }
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        initialContent = await res.text();
+    } catch (err) {
+        app.innerHTML = `<div class="${CLS.error}">Failed to load this note: ${escapeHtml(err.message)}</div>`;
+        return;
+    }
+
     app.innerHTML = `
         <div class="${CLS.headerRow}">
             <h2 id="note-title" class="${CLS.h2} flex-1">${escapeHtml(noteId)}</h2>
@@ -140,25 +178,15 @@ function renderNote(noteId) {
         <div id="editor-container" class="${CLS.editor}"></div>
     `;
 
-    const apiUrl = '/api/v1/notes/' + encodeURIComponent(noteId);
     const pathInput = document.getElementById('path-input');
     const editor = new toastui.Editor({
         el: document.querySelector('#editor-container'),
         height: '650px',
         initialEditType: 'markdown',
         previewStyle: window.matchMedia('(min-width: 768px)').matches ? 'vertical' : 'tab',
-        initialValue: DEFAULT_MARKDOWN,
+        initialValue: initialContent,
         usageStatistics: false
     });
-
-    fetch(apiUrl)
-        .then(res => {
-            if (res.status === 404) return null;
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            return res.text();
-        })
-        .then(md => { if (md !== null) editor.setMarkdown(md); })
-        .catch(() => editor.setMarkdown('# Error\n\nCould not load this note.'));
 
     fetch(apiUrl + '/meta')
         .then(res => (res.ok ? res.json() : null))

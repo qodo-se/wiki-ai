@@ -1,3 +1,5 @@
+import uuid as uuidlib
+
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -65,15 +67,26 @@ def get_note_meta(uuid: str):
     return NoteMeta(id=row[0], title=row[1], path=row[2], created_at=row[3], updated_at=row[4])
 
 
+@router.post("")
+def create_note(body: NoteBody):
+    new_id = str(uuidlib.uuid4())
+    with connect() as db:
+        db.execute(
+            "INSERT INTO notes (id, content, path) VALUES (?, ?, ?)",
+            (new_id, body.content, body.path),
+        )
+    return {"id": new_id}
+
+
 @router.put("/{uuid}")
 def put_note(uuid: str, body: NoteBody):
     with connect() as db:
-        db.execute(
-            "INSERT INTO notes (id, content, path) VALUES (?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET "
-            "content = excluded.content, path = excluded.path, updated_at = datetime('now')",
-            (uuid, body.content, body.path),
+        cursor = db.execute(
+            "UPDATE notes SET content = ?, path = ?, updated_at = datetime('now') WHERE id = ?",
+            (body.content, body.path, uuid),
         )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="note not found")
     return {"id": uuid}
 
 
