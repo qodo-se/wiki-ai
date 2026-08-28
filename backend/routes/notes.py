@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
+from categorize import reorganize_notes
 from db import connect
 from embeddings import EmbeddingError, embed_text
 from vectorstore import VectorStoreError, delete_vector, upsert_vector
@@ -77,6 +78,11 @@ def list_notes(limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0
         for r in rows
     ]
     return NoteListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.post("/reorganize")
+def reorganize():
+    return reorganize_notes()
 
 
 @router.get("/{uuid}", response_class=PlainTextResponse)

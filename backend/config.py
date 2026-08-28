@@ -3,8 +3,10 @@ from db import connect
 DEFAULTS = {
     "ollama_url": "http://host.docker.internal:11434",
     "ollama_embedding_model": "nomic-embed-text",
+    "ollama_chat_model": "gemma4:e4b",
     "qdrant_url": "http://qdrant:6333",
     "qdrant_collection": "notes",
+    "categorize_neighbor_limit": "5",
 }
 
 

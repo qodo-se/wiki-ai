@@ -86,6 +86,30 @@ def delete_vector(point_id: str) -> None:
         raise VectorStoreError(f"could not delete vector: {resp}")
 
 
+def scroll_all_points(batch_size: int = 100) -> list[dict]:
+    _, collection = _cfg()
+    points = []
+    offset = None
+    while True:
+        body = {"limit": batch_size, "with_vector": True, "with_payload": False}
+        if offset is not None:
+            body["offset"] = offset
+        status, resp = _request("POST", f"/collections/{collection}/points/scroll", body)
+        if status == 404:
+            return []  # collection doesn't exist yet — nothing has been embedded
+        if status != 200:
+            raise VectorStoreError(f"could not scroll vectors: {resp}")
+        result = resp.get("result") if isinstance(resp, dict) else None
+        batch = result.get("points") if isinstance(result, dict) else None
+        if not isinstance(batch, list):
+            raise VectorStoreError(f"unexpected Qdrant scroll response: {resp}")
+        points.extend(batch)
+        offset = result.get("next_page_offset")
+        if offset is None:
+            break
+    return points
+
+
 def search_vectors(vector: list[float], limit: int) -> list[dict]:
     _, collection = _cfg()
     status, resp = _request(

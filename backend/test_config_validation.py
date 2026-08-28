@@ -23,3 +23,18 @@ def test_unset_fields_stay_none():
     body = ConfigBody(qdrant_collection="notes")
     assert body.ollama_url is None
     assert body.qdrant_collection == "notes"
+
+
+def test_rejects_non_integer_neighbor_limit():
+    with pytest.raises(ValidationError):
+        ConfigBody(categorize_neighbor_limit="5.5")
+
+
+def test_rejects_zero_neighbor_limit():
+    with pytest.raises(ValidationError):
+        ConfigBody(categorize_neighbor_limit="0")
+
+
+def test_accepts_valid_neighbor_limit():
+    body = ConfigBody(categorize_neighbor_limit="15")
+    assert body.categorize_neighbor_limit == "15"

@@ -11,10 +11,18 @@ URL_FIELDS = {"ollama_url", "qdrant_url"}
 class ConfigBody(BaseModel):
     ollama_url: str | None = None
     ollama_embedding_model: str | None = None
+    ollama_chat_model: str | None = None
     qdrant_url: str | None = None
     qdrant_collection: str | None = None
+    categorize_neighbor_limit: str | None = None
 
-    @field_validator("ollama_url", "qdrant_url", "ollama_embedding_model", "qdrant_collection")
+    @field_validator(
+        "ollama_url",
+        "qdrant_url",
+        "ollama_embedding_model",
+        "ollama_chat_model",
+        "qdrant_collection",
+    )
     @classmethod
     def _not_blank(cls, v, info):
         if v is None:
@@ -24,6 +32,19 @@ class ConfigBody(BaseModel):
             raise ValueError(f"{info.field_name} cannot be blank")
         if info.field_name in URL_FIELDS and not (v.startswith("http://") or v.startswith("https://")):
             raise ValueError(f"{info.field_name} must start with http:// or https://")
+        return v
+
+    @field_validator("categorize_neighbor_limit")
+    @classmethod
+    def _valid_neighbor_limit(cls, v):
+        if v is None:
+            return v
+        try:
+            n = int(v)
+        except ValueError:
+            raise ValueError("categorize_neighbor_limit must be an integer")
+        if n < 1:
+            raise ValueError("categorize_neighbor_limit must be at least 1")
         return v
 
 
