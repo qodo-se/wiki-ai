@@ -8,6 +8,7 @@ from db import connect
 class SearchHit(BaseModel):
     id: str
     title: str
+    path: str
     preview: str
     score: int
     created_at: str
@@ -51,7 +52,7 @@ def search_notes(query: str, limit: int) -> list[SearchHit]:
     pattern = f"%{_escape_like(q)}%"
     with connect() as db:
         rows = db.execute(
-            "SELECT id, title, content, created_at FROM notes "
+            "SELECT id, title, path, content, created_at FROM notes "
             "WHERE content LIKE ? ESCAPE '\\' COLLATE NOCASE "
             "ORDER BY created_at DESC",
             (pattern,),
@@ -61,10 +62,11 @@ def search_notes(query: str, limit: int) -> list[SearchHit]:
     hits = [
         SearchHit(
             id=row[0],
-            title=row[1] or _derive_title(row[2]),
-            preview=_build_snippet(row[2], q),
-            score=row[2].lower().count(q_lower),
-            created_at=row[3],
+            title=row[1] or _derive_title(row[3]),
+            path=row[2],
+            preview=_build_snippet(row[3], q),
+            score=row[3].lower().count(q_lower),
+            created_at=row[4],
         )
         for row in rows
     ]

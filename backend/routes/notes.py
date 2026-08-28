@@ -1,33 +1,45 @@
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from db import connect
 
 router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
 
+PATH_PATTERN = r"^[A-Za-z0-9 _./-]*$"
+
 
 class NoteBody(BaseModel):
     content: str
+    path: str = Field(default="/", max_length=200, pattern=PATH_PATTERN)
 
 
 class NoteSummary(BaseModel):
     id: str
     title: str
+    path: str
     preview: str
     created_at: str
+
+
+class NoteMeta(BaseModel):
+    id: str
+    title: str
+    path: str
+    created_at: str
+    updated_at: str
 
 
 @router.get("", response_model=list[NoteSummary])
 def list_notes(limit: int = Query(10, ge=1, le=100)):
     with connect() as db:
         rows = db.execute(
-            "SELECT id, title, substr(content, 1, 120) AS preview, created_at "
+            "SELECT id, title, path, substr(content, 1, 120) AS preview, created_at "
             "FROM notes ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
     return [
-        NoteSummary(id=r[0], title=r[1], preview=r[2], created_at=r[3])
+        NoteSummary(id=r[0], title=r[1], path=r[2], preview=r[3], created_at=r[4])
         for r in rows
     ]
 
@@ -41,14 +53,26 @@ def get_note(uuid: str):
     return row[0]
 
 
+@router.get("/{uuid}/meta", response_model=NoteMeta)
+def get_note_meta(uuid: str):
+    with connect() as db:
+        row = db.execute(
+            "SELECT id, title, path, created_at, updated_at FROM notes WHERE id = ?",
+            (uuid,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="note not found")
+    return NoteMeta(id=row[0], title=row[1], path=row[2], created_at=row[3], updated_at=row[4])
+
+
 @router.put("/{uuid}")
 def put_note(uuid: str, body: NoteBody):
     with connect() as db:
         db.execute(
-            "INSERT INTO notes (id, content) VALUES (?, ?) "
+            "INSERT INTO notes (id, content, path) VALUES (?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
-            "content = excluded.content, updated_at = datetime('now')",
-            (uuid, body.content),
+            "content = excluded.content, path = excluded.path, updated_at = datetime('now')",
+            (uuid, body.content, body.path),
         )
     return {"id": uuid}
 

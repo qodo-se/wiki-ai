@@ -17,6 +17,15 @@ const CLS = {
     error: 'text-center text-red-600 py-10 px-5 bg-white rounded-lg shadow-sm',
     searchInput: 'block w-full max-w-[1200px] mx-auto mb-5 px-4 py-3 text-base bg-white border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:border-gray-500',
     editor: 'max-w-[1200px] mx-auto bg-white rounded-lg shadow-md overflow-hidden',
+    pathBadge: 'text-gray-400 text-xs font-mono truncate',
+    pathRow: 'max-w-[1200px] mx-auto mb-4 flex items-center gap-2',
+    pathLabel: 'text-gray-500 text-sm shrink-0',
+    pathInput: 'flex-1 min-w-0 px-3 py-1.5 text-sm font-mono bg-white border border-gray-300 rounded-md focus:outline-none focus:border-gray-500',
+    viewToggle: 'max-w-[1200px] mx-auto mb-4 flex gap-2',
+    toggleBtn: 'px-3 py-1.5 text-sm font-medium rounded-md border transition-colors',
+    toggleBtnActive: 'bg-black text-white border-black',
+    toggleBtnInactive: 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100',
+    groupHeading: 'max-w-[1200px] mx-auto mt-6 mb-2 px-1 text-xs font-semibold text-gray-500 uppercase tracking-wide font-mono first:mt-0',
 };
 
 function escapeHtml(s) {
@@ -37,13 +46,54 @@ function previewFor(note) {
     return text || note.id;
 }
 
+function noteItemHtml(n) {
+    return `
+        <div class="${CLS.item}">
+            <div class="${CLS.itemBody}">
+                <a href="/notes/${encodeURIComponent(n.id)}" class="${CLS.itemLink} block">${escapeHtml(previewFor(n))}</a>
+                <div class="${CLS.pathBadge}">${escapeHtml(n.path || '/')} · ${escapeHtml(n.id)}</div>
+            </div>
+            <time class="${CLS.itemTime}">${escapeHtml(formatDate(n.created_at))}</time>
+        </div>
+    `;
+}
+
+function groupByPath(notes) {
+    const groups = new Map();
+    for (const n of notes) {
+        const key = n.path || '/';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(n);
+    }
+    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
+function renderNoteList(list, notes, mode) {
+    if (!notes.length) {
+        list.innerHTML = `<div class="${CLS.notice}">No notes yet — tap <strong>New note</strong> to create one.</div>`;
+        return;
+    }
+    if (mode === 'path') {
+        list.innerHTML = groupByPath(notes).map(([path, group]) => `
+            <h3 class="${CLS.groupHeading}">${escapeHtml(path)}</h3>
+            ${group.map(noteItemHtml).join('')}
+        `).join('');
+        return;
+    }
+    list.innerHTML = notes.map(noteItemHtml).join('');
+}
+
 async function renderHome() {
     app.innerHTML = `
         <div class="${CLS.headerRow}">
             <h2 class="${CLS.h2}">My Local Vault</h2>
             <button id="new-note-btn" class="${CLS.primaryBtn}">New note</button>
         </div>
-        <ul id="recent-notes" class="${CLS.list}"></ul>
+        <div class="${CLS.viewToggle}">
+            <button id="view-title-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnActive}">By Title</button>
+            <button id="view-path-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnInactive}">By Path</button>
+        </div>
+        <div id="recent-notes" class="${CLS.list}"></div>
     `;
 
     document.getElementById('new-note-btn').addEventListener('click', () => {
@@ -51,22 +101,28 @@ async function renderHome() {
     });
 
     const list = document.getElementById('recent-notes');
+    const titleBtn = document.getElementById('view-title-btn');
+    const pathBtn = document.getElementById('view-path-btn');
+    let mode = 'title';
+    let notes = [];
+
+    function setMode(next) {
+        mode = next;
+        titleBtn.className = `${CLS.toggleBtn} ${mode === 'title' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
+        pathBtn.className = `${CLS.toggleBtn} ${mode === 'path' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
+        renderNoteList(list, notes, mode);
+    }
+
+    titleBtn.addEventListener('click', () => setMode('title'));
+    pathBtn.addEventListener('click', () => setMode('path'));
+
     try {
         const res = await fetch('/api/v1/notes');
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        const notes = await res.json();
-        if (!notes.length) {
-            list.innerHTML = `<li class="${CLS.notice}">No notes yet — tap <strong>New note</strong> to create one.</li>`;
-            return;
-        }
-        list.innerHTML = notes.map(n => `
-            <li class="${CLS.item}">
-                <a href="/notes/${encodeURIComponent(n.id)}" class="${CLS.itemLink} flex-1 min-w-0">${escapeHtml(previewFor(n))}</a>
-                <time class="${CLS.itemTime}">${escapeHtml(formatDate(n.created_at))}</time>
-            </li>
-        `).join('');
+        notes = await res.json();
+        renderNoteList(list, notes, mode);
     } catch (err) {
-        list.innerHTML = `<li class="${CLS.error}">Failed to load notes: ${escapeHtml(err.message)}</li>`;
+        list.innerHTML = `<div class="${CLS.error}">Failed to load notes: ${escapeHtml(err.message)}</div>`;
     }
 }
 
@@ -77,10 +133,15 @@ function renderNote(noteId) {
             <button id="delete-btn" class="${CLS.dangerBtn}">Delete</button>
             <button id="save-btn" class="${CLS.primaryBtn}">Save Note</button>
         </div>
+        <div class="${CLS.pathRow}">
+            <label for="path-input" class="${CLS.pathLabel}">Path</label>
+            <input id="path-input" class="${CLS.pathInput}" type="text" value="/" placeholder="/" autocomplete="off" />
+        </div>
         <div id="editor-container" class="${CLS.editor}"></div>
     `;
 
     const apiUrl = '/api/v1/notes/' + encodeURIComponent(noteId);
+    const pathInput = document.getElementById('path-input');
     const editor = new toastui.Editor({
         el: document.querySelector('#editor-container'),
         height: '650px',
@@ -99,6 +160,11 @@ function renderNote(noteId) {
         .then(md => { if (md !== null) editor.setMarkdown(md); })
         .catch(() => editor.setMarkdown('# Error\n\nCould not load this note.'));
 
+    fetch(apiUrl + '/meta')
+        .then(res => (res.ok ? res.json() : null))
+        .then(meta => { if (meta) pathInput.value = meta.path || '/'; })
+        .catch(() => {});
+
     const saveBtn = document.getElementById('save-btn');
     const deleteBtn = document.getElementById('delete-btn');
 
@@ -109,7 +175,10 @@ function renderNote(noteId) {
             const res = await fetch(apiUrl, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: editor.getMarkdown() })
+                body: JSON.stringify({
+                    content: editor.getMarkdown(),
+                    path: pathInput.value.trim() || '/'
+                })
             });
             if (!res.ok) throw new Error('HTTP ' + res.status);
             saveBtn.textContent = 'Saved';
@@ -173,6 +242,7 @@ async function renderSearch() {
                 <li class="${CLS.item}">
                     <div class="${CLS.itemBody}">
                         <a href="/notes/${encodeURIComponent(n.id)}" class="${CLS.itemLink} block">${escapeHtml(previewFor(n))}</a>
+                        <div class="${CLS.pathBadge}">${escapeHtml(n.path || '/')}</div>
                         <div class="${CLS.snippet}">${escapeHtml(n.preview || '')}</div>
                     </div>
                     <time class="${CLS.itemTime}">${escapeHtml(formatDate(n.created_at))}</time>
