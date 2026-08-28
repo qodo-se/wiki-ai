@@ -2,7 +2,7 @@ import json
 import urllib.error
 import urllib.request
 
-from config import get_all_config
+from config import UnsafeConfigURLError, assert_url_is_safe, get_all_config
 
 
 class LLMError(Exception):
@@ -19,9 +19,10 @@ def generate_text(prompt: str) -> str:
         url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
     )
     try:
+        assert_url_is_safe(url)
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.load(resp)
-    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+    except (urllib.error.URLError, TimeoutError, ValueError, UnsafeConfigURLError) as e:
         raise LLMError(f"could not reach Ollama at {cfg['ollama_url']}: {e}") from e
 
     text = data.get("response") if isinstance(data, dict) else None

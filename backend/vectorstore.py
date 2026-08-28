@@ -2,7 +2,7 @@ import json
 import urllib.error
 import urllib.request
 
-from config import get_all_config
+from config import UnsafeConfigURLError, assert_url_is_safe, get_all_config
 
 
 class VectorStoreError(Exception):
@@ -16,11 +16,13 @@ def _cfg():
 
 def _request(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
     base_url, _ = _cfg()
+    url = base_url + path
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
-        base_url + path, data=data, headers={"Content-Type": "application/json"}, method=method
+        url, data=data, headers={"Content-Type": "application/json"}, method=method
     )
     try:
+        assert_url_is_safe(url)
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status, json.load(resp)
     except urllib.error.HTTPError as e:
@@ -28,7 +30,7 @@ def _request(method: str, path: str, body: dict | None = None) -> tuple[int, dic
             return e.code, json.loads(e.read() or b"{}")
         except json.JSONDecodeError:
             return e.code, {}
-    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+    except (urllib.error.URLError, TimeoutError, ValueError, UnsafeConfigURLError) as e:
         # ValueError also covers urllib rejecting a malformed/unsupported URL
         # and json.JSONDecodeError (a ValueError subclass) on a non-JSON body.
         raise VectorStoreError(f"could not reach Qdrant at {base_url}: {e}") from e

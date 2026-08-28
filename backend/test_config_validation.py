@@ -19,6 +19,16 @@ def test_accepts_valid_url():
     assert body.ollama_url == "http://host.docker.internal:11434"
 
 
+def test_rejects_link_local_url():
+    with pytest.raises(ValidationError):
+        ConfigBody(ollama_url="http://169.254.169.254/latest/meta-data/")
+
+
+def test_rejects_hostless_url():
+    with pytest.raises(ValidationError):
+        ConfigBody(ollama_url="http://")
+
+
 def test_unset_fields_stay_none():
     body = ConfigBody(qdrant_collection="notes")
     assert body.ollama_url is None

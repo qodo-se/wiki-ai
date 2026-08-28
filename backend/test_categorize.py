@@ -1,3 +1,5 @@
+import pytest
+
 import categorize
 import db
 
@@ -235,6 +237,16 @@ def test_reorganize_notes_groups_and_moves(monkeypatch):
     assert notes["recipe-a"]["path"] == "/recipes"
     assert notes["recipe-b"]["path"] == "/recipes"
     assert notes["lonely"]["path"] == "/"  # untouched singleton
+
+
+def test_reorganize_notes_rejects_concurrent_calls():
+    _insert_note("only-one", "just one note")
+    categorize._reorganize_lock.acquire()
+    try:
+        with pytest.raises(categorize.ReorganizeInProgress):
+            categorize.reorganize_notes()
+    finally:
+        categorize._reorganize_lock.release()
 
 
 def test_reorganize_notes_survives_vectorstore_outage(monkeypatch):

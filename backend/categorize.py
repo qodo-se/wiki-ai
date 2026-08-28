@@ -1,6 +1,7 @@
 import json
 import re
 import sys
+import threading
 
 from config import get_all_config
 from db import connect
@@ -11,6 +12,12 @@ from vectorstore import VectorStoreError, scroll_all_points, search_vectors
 PATH_CHARSET = re.compile(r"[^A-Za-z0-9 _./-]")
 MAX_PATH_LENGTH = 200
 MAX_REPRESENTATIVES_PER_CLUSTER = 5
+
+_reorganize_lock = threading.Lock()
+
+
+class ReorganizeInProgress(Exception):
+    pass
 
 
 class _UnionFind:
@@ -179,61 +186,66 @@ def _consolidate_names(proposed_names: list[str]) -> dict[str, str]:
 
 
 def reorganize_notes() -> dict:
-    notes = _fetch_all_notes()
-    if len(notes) < 2:
-        return {"clusters": 0, "moved": 0, "unchanged": len(notes), "singletons": len(notes)}
-
+    if not _reorganize_lock.acquire(blocking=False):
+        raise ReorganizeInProgress("a reorganize run is already in progress")
     try:
-        vectors = _fetch_all_vectors()
-    except VectorStoreError as e:
-        print(f"warning: could not fetch vectors for reorganize: {e}", file=sys.stderr)
-        vectors = {}
-    vectors = {note_id: v for note_id, v in vectors.items() if note_id in notes}
+        notes = _fetch_all_notes()
+        if len(notes) < 2:
+            return {"clusters": 0, "moved": 0, "unchanged": len(notes), "singletons": len(notes)}
 
-    cfg = get_all_config()
-    neighbor_limit = int(cfg["categorize_neighbor_limit"])
+        try:
+            vectors = _fetch_all_vectors()
+        except VectorStoreError as e:
+            print(f"warning: could not fetch vectors for reorganize: {e}", file=sys.stderr)
+            vectors = {}
+        vectors = {note_id: v for note_id, v in vectors.items() if note_id in notes}
 
-    try:
-        graph = _build_neighbor_graph(vectors, neighbor_limit)
-    except (VectorStoreError, EmbeddingError) as e:
-        print(f"warning: could not build neighbor graph for reorganize: {e}", file=sys.stderr)
-        graph = {}
+        cfg = get_all_config()
+        neighbor_limit = int(cfg["categorize_neighbor_limit"])
 
-    clusters = _cluster_ids(list(vectors.keys()), graph)
-    real_clusters = [c for c in clusters if len(c) >= 2]
+        try:
+            graph = _build_neighbor_graph(vectors, neighbor_limit)
+        except (VectorStoreError, EmbeddingError) as e:
+            print(f"warning: could not build neighbor graph for reorganize: {e}", file=sys.stderr)
+            graph = {}
 
-    proposed_names: dict[int, str] = {}
-    for idx, cluster in enumerate(real_clusters):
-        name = _name_cluster(_representative_notes(cluster, notes))
-        if name:
-            proposed_names[idx] = name
+        clusters = _cluster_ids(list(vectors.keys()), graph)
+        real_clusters = [c for c in clusters if len(c) >= 2]
 
-    consolidated = _consolidate_names(list(proposed_names.values()))
+        proposed_names: dict[int, str] = {}
+        for idx, cluster in enumerate(real_clusters):
+            name = _name_cluster(_representative_notes(cluster, notes))
+            if name:
+                proposed_names[idx] = name
 
-    moved, unchanged = 0, 0
-    updates = []
-    for idx, cluster in enumerate(real_clusters):
-        final_path = consolidated.get(proposed_names.get(idx, ""))
-        if not final_path:
-            unchanged += len(cluster)
-            continue
-        for note_id in cluster:
-            if notes[note_id]["path"] == final_path:
-                unchanged += 1
-            else:
-                updates.append((final_path, note_id))
-                moved += 1
+        consolidated = _consolidate_names(list(proposed_names.values()))
 
-    if updates:
-        with connect() as db:
-            db.executemany(
-                "UPDATE notes SET path = ?, updated_at = datetime('now') WHERE id = ?", updates
-            )
+        moved, unchanged = 0, 0
+        updates = []
+        for idx, cluster in enumerate(real_clusters):
+            final_path = consolidated.get(proposed_names.get(idx, ""))
+            if not final_path:
+                unchanged += len(cluster)
+                continue
+            for note_id in cluster:
+                if notes[note_id]["path"] == final_path:
+                    unchanged += 1
+                else:
+                    updates.append((final_path, note_id))
+                    moved += 1
 
-    singletons = len(notes) - sum(len(c) for c in real_clusters)
-    return {
-        "clusters": len(real_clusters),
-        "moved": moved,
-        "unchanged": unchanged + singletons,
-        "singletons": singletons,
-    }
+        if updates:
+            with connect() as db:
+                db.executemany(
+                    "UPDATE notes SET path = ?, updated_at = datetime('now') WHERE id = ?", updates
+                )
+
+        singletons = len(notes) - sum(len(c) for c in real_clusters)
+        return {
+            "clusters": len(real_clusters),
+            "moved": moved,
+            "unchanged": unchanged + singletons,
+            "singletons": singletons,
+        }
+    finally:
+        _reorganize_lock.release()
