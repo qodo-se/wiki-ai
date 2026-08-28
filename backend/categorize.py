@@ -4,7 +4,7 @@ import sys
 
 from config import get_all_config
 from db import connect
-from embeddings import EmbeddingError
+from embeddings import EmbeddingError, embed_text
 from llm import LLMError, generate_text
 from vectorstore import VectorStoreError, scroll_all_points, search_vectors
 
@@ -41,7 +41,16 @@ def _fetch_all_notes() -> dict[str, dict]:
     return {r[0]: {"content": r[1], "path": r[2], "title": r[3]} for r in rows}
 
 
-def _fetch_all_vectors() -> dict[str, list[float]]:
+def _fetch_all_vectors(notes: dict[str, dict]) -> dict[str, list[float]]:
+    # Rebuild the index from the snapshot so stale or missing best-effort
+    # vectors can never drive destructive path changes.
+    for note_id, note in notes.items():
+        try:
+            vector = embed_text(note["content"])
+            from vectorstore import upsert_vector
+            upsert_vector(note_id, vector)
+        except (EmbeddingError, VectorStoreError) as e:
+            raise VectorStoreError(f"incomplete embedding index for note {note_id}: {e}") from e
     points = scroll_all_points()
     vectors = {}
     for p in points:
@@ -184,10 +193,9 @@ def reorganize_notes() -> dict:
         return {"clusters": 0, "moved": 0, "unchanged": len(notes), "singletons": len(notes)}
 
     try:
-        vectors = _fetch_all_vectors()
+        vectors = _fetch_all_vectors(notes)
     except VectorStoreError as e:
-        print(f"warning: could not fetch vectors for reorganize: {e}", file=sys.stderr)
-        vectors = {}
+        raise RuntimeError(f"incomplete embedding index: {e}") from e
     vectors = {note_id: v for note_id, v in vectors.items() if note_id in notes}
 
     cfg = get_all_config()
@@ -221,16 +229,17 @@ def reorganize_notes() -> dict:
             if notes[note_id]["path"] == final_path:
                 unchanged += 1
             else:
-                updates.append((final_path, note_id))
-                moved += 1
+                updates.append((final_path, notes[note_id]["path"], note_id))
+                moved = 0
 
     if updates:
         with connect() as db:
             db.executemany(
-                "UPDATE notes SET path = ?, updated_at = datetime('now') WHERE id = ?", updates
+                "UPDATE notes SET path = ?, updated_at = datetime('now') WHERE id = ? AND path = ?", updates
             )
 
-    singletons = len(notes) - sum(len(c) for c in real_clusters)
+    moved = db.total_changes if updates else 0
+      singletons = len(notes) - sum(len(c) for c in real_clusters)
     return {
         "clusters": len(real_clusters),
         "moved": moved,
