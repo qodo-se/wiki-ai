@@ -33,6 +33,8 @@ func main() {
 		runDelete(args)
 	case "search":
 		runSearch(args)
+	case "search-semantic":
+		runSemanticSearch(args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -55,7 +57,10 @@ Commands:
   create               create a note (content from --file or stdin)
   update <uuid>        update a note (content from --file or stdin)
   delete <uuid>        delete a note
-  search <query>       search notes
+  search <query>       search notes (keyword match)
+  search-semantic <query>
+                       search notes by meaning, via embeddings (requires
+                       Ollama + Qdrant configured server-side)
 
 list flags:
   --limit int    max number of notes to return per page (default 10)
@@ -259,6 +264,27 @@ func runSearch(args []string) {
 	}
 
 	hits, err := newClient(url).search(fs.Arg(0), *limit)
+	if err != nil {
+		fail(err)
+	}
+	for _, h := range hits {
+		fmt.Printf("%s  %-30s %-20s %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), sanitizeForTerminal(h.Preview))
+	}
+}
+
+func runSemanticSearch(args []string) {
+	fs := flag.NewFlagSet("search-semantic", flag.ExitOnError)
+	limit := fs.Int("limit", 10, "max number of results")
+	urlFlag := addURLFlag(fs)
+	fs.Parse(args)
+	url := *urlFlag
+
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli search-semantic <query>")
+		os.Exit(1)
+	}
+
+	hits, err := newClient(url).semanticSearch(fs.Arg(0), *limit)
 	if err != nil {
 		fail(err)
 	}

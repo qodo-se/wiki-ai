@@ -1,3 +1,4 @@
+import sys
 import uuid as uuidlib
 
 from fastapi import APIRouter, HTTPException, Query
@@ -5,8 +6,27 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from db import connect
+from embeddings import EmbeddingError, embed_text
+from vectorstore import VectorStoreError, delete_vector, upsert_vector
 
 router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
+
+
+def _sync_embedding(note_id: str, content: str) -> None:
+    # Semantic search is a best-effort add-on — a down/unconfigured Ollama or
+    # Qdrant must never block saving a note.
+    try:
+        vector = embed_text(content)
+        upsert_vector(note_id, vector)
+    except (EmbeddingError, VectorStoreError) as e:
+        print(f"warning: failed to embed note {note_id}: {e}", file=sys.stderr)
+
+
+def _delete_embedding(note_id: str) -> None:
+    try:
+        delete_vector(note_id)
+    except VectorStoreError as e:
+        print(f"warning: failed to delete vector for note {note_id}: {e}", file=sys.stderr)
 
 PATH_PATTERN = r"^[A-Za-z0-9 _./-]*$"
 
@@ -88,6 +108,7 @@ def create_note(body: NoteBody):
             "INSERT INTO notes (id, content, path) VALUES (?, ?, ?)",
             (new_id, body.content, body.path),
         )
+    _sync_embedding(new_id, body.content)
     return {"id": new_id}
 
 
@@ -100,6 +121,7 @@ def put_note(uuid: str, body: NoteBody):
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="note not found")
+    _sync_embedding(uuid, body.content)
     return {"id": uuid}
 
 
@@ -109,3 +131,4 @@ def delete_note(uuid: str):
         cursor = db.execute("DELETE FROM notes WHERE id = ?", (uuid,))
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="note not found")
+    _delete_embedding(uuid)

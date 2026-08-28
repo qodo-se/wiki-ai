@@ -7,8 +7,22 @@ services:
       - wiki-data:/data
     environment:
       - HOST=0.0.0.0
+    # Lets the api container reach Ollama running on the host machine at
+    # http://host.docker.internal:11434 (the default in the settings UI).
+    # Docker Desktop (Mac/Windows) wires this up automatically; on Linux this
+    # extra_hosts entry is what makes host.docker.internal resolve.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8081:80"
+    depends_on:
+      - qdrant
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - qdrant-data:/qdrant/storage
 
 volumes:
   wiki-data:
+  qdrant-data:

@@ -221,6 +221,30 @@ func TestSearchRequest(t *testing.T) {
 	}
 }
 
+func TestSemanticSearchRequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/search/semantic" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("q"); got != "hello world" {
+			t.Errorf("q = %q", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "7" {
+			t.Errorf("limit = %q", got)
+		}
+		json.NewEncoder(w).Encode([]searchHit{{ID: "x"}})
+	}))
+	defer srv.Close()
+
+	hits, err := newClient(srv.URL).semanticSearch("hello world", 7)
+	if err != nil {
+		t.Fatalf("semanticSearch: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ID != "x" {
+		t.Fatalf("unexpected hits: %+v", hits)
+	}
+}
+
 func TestNon2xxReturnsAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

@@ -192,3 +192,18 @@ func (c *client) search(query string, limit int) ([]searchHit, error) {
 	}
 	return hits, nil
 }
+
+func (c *client) semanticSearch(query string, limit int) ([]searchHit, error) {
+	body, err := c.do(http.MethodGet, "/api/v1/search/semantic", url.Values{
+		"q":     {query},
+		"limit": {fmt.Sprint(limit)},
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	var hits []searchHit
+	if err := json.Unmarshal(body, &hits); err != nil {
+		return nil, err
+	}
+	return hits, nil
+}

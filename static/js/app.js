@@ -29,6 +29,10 @@ const CLS = {
     pagination: 'max-w-[1200px] mx-auto mt-5 flex justify-between items-center gap-3',
     pageInfo: 'text-gray-500 text-sm',
     pageBtn: 'px-3 py-1.5 text-sm font-medium rounded-md border bg-white text-gray-700 border-gray-300 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white',
+    settingsCard: 'max-w-[1200px] mx-auto bg-white rounded-lg shadow-sm p-5 sm:p-6',
+    fieldLabel: 'block text-sm font-medium text-gray-700 mb-1',
+    fieldInput: 'block w-full px-3 py-2 text-sm font-mono bg-white border border-gray-300 rounded-md focus:outline-none focus:border-gray-500',
+    fieldHelp: 'text-gray-500 text-xs mt-1',
 };
 
 const PAGE_SIZE = 10;
@@ -287,6 +291,10 @@ async function renderSearch() {
         <div class="${CLS.headerRow}">
             <h2 class="${CLS.h2}">Search</h2>
         </div>
+        <div class="${CLS.viewToggle}">
+            <button id="mode-keyword-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnActive}">Keyword</button>
+            <button id="mode-semantic-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnInactive}">Semantic</button>
+        </div>
         <input id="search-input" class="${CLS.searchInput}" type="search" placeholder="Search your notes…" autocomplete="off" autofocus />
         <ul id="search-results" class="${CLS.list}">
             <li class="${CLS.notice}">Type to search your notes.</li>
@@ -295,8 +303,16 @@ async function renderSearch() {
 
     const input = document.getElementById('search-input');
     const results = document.getElementById('search-results');
+    const keywordBtn = document.getElementById('mode-keyword-btn');
+    const semanticBtn = document.getElementById('mode-semantic-btn');
     let timer = null;
     let currentReqId = 0;
+    let mode = 'keyword';
+
+    const ENDPOINTS = {
+        keyword: '/api/v1/search',
+        semantic: '/api/v1/search/semantic',
+    };
 
     async function runSearch(q) {
         if (!q.trim()) {
@@ -305,10 +321,11 @@ async function renderSearch() {
         }
         const reqId = ++currentReqId;
         try {
-            const res = await fetch('/api/v1/search?q=' + encodeURIComponent(q) + '&limit=10');
+            const res = await fetch(ENDPOINTS[mode] + '?q=' + encodeURIComponent(q) + '&limit=10');
             if (reqId !== currentReqId) return; // stale
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const hits = await res.json();
+            if (reqId !== currentReqId) return; // stale
             if (!hits.length) {
                 results.innerHTML = `<li class="${CLS.notice}">No notes match "${escapeHtml(q)}".</li>`;
                 return;
@@ -329,14 +346,94 @@ async function renderSearch() {
         }
     }
 
+    function setMode(next) {
+        if (mode === next) return;
+        mode = next;
+        keywordBtn.className = `${CLS.toggleBtn} ${mode === 'keyword' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
+        semanticBtn.className = `${CLS.toggleBtn} ${mode === 'semantic' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
+        runSearch(input.value);
+    }
+
+    keywordBtn.addEventListener('click', () => setMode('keyword'));
+    semanticBtn.addEventListener('click', () => setMode('semantic'));
     input.addEventListener('input', () => {
         clearTimeout(timer);
         timer = setTimeout(() => runSearch(input.value), 200);
     });
 }
 
+async function renderSettings() {
+    app.innerHTML = `
+        <div class="${CLS.headerRow}">
+            <h2 class="${CLS.h2}">Settings</h2>
+        </div>
+        <div id="settings-body" class="${CLS.settingsCard}">
+            <div class="${CLS.notice}">Loading…</div>
+        </div>
+    `;
+
+    const body = document.getElementById('settings-body');
+    const FIELDS = [
+        { key: 'ollama_url', label: 'Ollama URL', help: 'Base URL of the Ollama server used to generate embeddings.' },
+        { key: 'ollama_embedding_model', label: 'Ollama embedding model', help: 'Model name to use for embeddings, e.g. nomic-embed-text.' },
+        { key: 'qdrant_url', label: 'Qdrant URL', help: 'Base URL of the Qdrant vector database.' },
+        { key: 'qdrant_collection', label: 'Qdrant collection', help: 'Name of the Qdrant collection notes are stored in.' },
+    ];
+
+    let cfg;
+    try {
+        const res = await fetch('/api/v1/config');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        cfg = await res.json();
+    } catch (err) {
+        body.innerHTML = `<div class="${CLS.error}">Failed to load settings: ${escapeHtml(err.message)}</div>`;
+        return;
+    }
+
+    body.innerHTML = `
+        <form id="settings-form" class="space-y-4">
+            ${FIELDS.map(f => `
+                <div>
+                    <label for="field-${f.key}" class="${CLS.fieldLabel}">${escapeHtml(f.label)}</label>
+                    <input id="field-${f.key}" type="text" value="${escapeHtml(cfg[f.key] || '')}" class="${CLS.fieldInput}" autocomplete="off" />
+                    <p class="${CLS.fieldHelp}">${escapeHtml(f.help)}</p>
+                </div>
+            `).join('')}
+            <div class="flex items-center gap-3 pt-2">
+                <button type="submit" class="${CLS.primaryBtn}">Save settings</button>
+                <span id="settings-status" class="text-sm text-gray-500"></span>
+            </div>
+        </form>
+    `;
+
+    document.getElementById('settings-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const status = document.getElementById('settings-status');
+        const submitBtn = e.target.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        status.textContent = 'Saving…';
+        try {
+            const payload = {};
+            for (const f of FIELDS) payload[f.key] = document.getElementById(`field-${f.key}`).value.trim();
+            const res = await fetch('/api/v1/config', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            status.textContent = 'Saved';
+            setTimeout(() => { status.textContent = ''; }, 1500);
+        } catch (err) {
+            status.textContent = 'Failed: ' + err.message;
+        } finally {
+            submitBtn.disabled = false;
+        }
+    });
+}
+
 function route() {
     if (window.location.pathname.match(/^\/search\/?$/)) return renderSearch();
+    if (window.location.pathname.match(/^\/settings\/?$/)) return renderSettings();
     const m = window.location.pathname.match(/^\/notes\/([^\/]+)\/?$/);
     if (m) return renderNote(decodeURIComponent(m[1]));
     return renderHome();
