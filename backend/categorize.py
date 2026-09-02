@@ -18,10 +18,14 @@ class ReorganizeInProgress(Exception):
     pass
 
 
+class ClassificationFailed(Exception):
+    pass
+
+
 def _fetch_all_notes() -> dict[str, dict]:
     with connect() as db:
-        rows = db.execute("SELECT id, content, path, title FROM notes ORDER BY id").fetchall()
-    return {r[0]: {"content": r[1], "path": r[2], "title": r[3]} for r in rows}
+        rows = db.execute("SELECT id, content, path, title, updated_at FROM notes ORDER BY id").fetchall()
+    return {r[0]: {"content": r[1], "path": r[2], "title": r[3], "updated_at": r[4]} for r in rows}
 
 
 def _note_label(note: dict) -> str:
@@ -96,11 +100,10 @@ def _choose_subdirectory(note: dict, top_name: str, subs: dict[str, dict]) -> st
         raw = generate_text(prompt)
     except LLMError as e:
         print(
-            f"warning: failed to classify subdirectory under /{top_name}, "
-            f"filing directly under the top level: {e}",
+            f"warning: failed to classify subdirectory under /{top_name}: {e}",
             file=sys.stderr,
         )
-        return None
+        raise ClassificationFailed from e
     if raw.strip().strip("`\"' ").lower().startswith("none"):
         return None
     return _sanitize_segment(raw)
@@ -160,7 +163,7 @@ def reorganize_notes() -> dict:
         raise ReorganizeInProgress("a reorganize run is already in progress")
     try:
         notes = _fetch_all_notes()
-        if len(notes) < 2:
+        if not notes:
             return {"classified": 0, "moved": 0, "unchanged": len(notes), "failed": 0}
 
         taxonomy: dict[str, dict] = {}
@@ -174,7 +177,11 @@ def reorganize_notes() -> dict:
                 continue
             node = taxonomy.setdefault(top, {"examples": [], "subs": {}})
 
-            sub = _choose_subdirectory(note, top, node["subs"])
+            try:
+                  sub = _choose_subdirectory(note, top, node["subs"])
+              except ClassificationFailed:
+                  failed += 1
+                  continue
             if sub == top:
                 sub = None  # redundant self-named subdirectory folds into the parent
 
@@ -225,13 +232,13 @@ def reorganize_notes() -> dict:
             if final_path == note["path"]:
                 unchanged += 1
             else:
-                updates.append((final_path, note_id))
+                updates.append((final_path, note_id, note["updated_at"]))
                 moved += 1
 
         if updates:
             with connect() as db:
                 db.executemany(
-                    "UPDATE notes SET path = ?, updated_at = datetime('now') WHERE id = ?", updates
+                    "UPDATE notes SET path = ?, updated_at = datetime('now') WHERE id = ? AND updated_at = ?", updates
                 )
 
         return {
