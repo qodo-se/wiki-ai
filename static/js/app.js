@@ -376,6 +376,7 @@ async function renderSettings() {
     const FIELDS = [
         { key: 'ollama_url', label: 'Ollama URL', help: 'Base URL of the Ollama server used to generate embeddings.' },
         { key: 'ollama_embedding_model', label: 'Ollama embedding model', help: 'Model name to use for embeddings, e.g. nomic-embed-text.' },
+        { key: 'ollama_chat_model', label: 'Ollama chat model', help: 'Model used to classify and name folders when reorganizing notes.' },
         { key: 'qdrant_url', label: 'Qdrant URL', help: 'Base URL of the Qdrant vector database.' },
         { key: 'qdrant_collection', label: 'Qdrant collection', help: 'Name of the Qdrant collection notes are stored in.' },
     ];
@@ -404,6 +405,15 @@ async function renderSettings() {
                 <span id="settings-status" class="text-sm text-gray-500"></span>
             </div>
         </form>
+        <hr class="my-6 border-gray-200" />
+        <div>
+            <h3 class="text-base font-semibold text-gray-800 mb-1">Reorganize notes</h3>
+            <p class="${CLS.fieldHelp} mb-3">Asks the chat model above to file every note into a folder (and subfolder, where it makes sense), one note at a time. Re-running can move notes you've already organized.</p>
+            <div class="flex items-center gap-3">
+                <button id="reorganize-btn" class="${CLS.primaryBtn}">Reorganize notes</button>
+            </div>
+            <p id="reorganize-result" class="${CLS.fieldHelp} mt-2"></p>
+        </div>
     `;
 
     document.getElementById('settings-form').addEventListener('submit', async (e) => {
@@ -427,6 +437,26 @@ async function renderSettings() {
             status.textContent = 'Failed: ' + err.message;
         } finally {
             submitBtn.disabled = false;
+        }
+    });
+
+    const reorganizeBtn = document.getElementById('reorganize-btn');
+    const reorganizeResult = document.getElementById('reorganize-result');
+    reorganizeBtn.addEventListener('click', async () => {
+        reorganizeBtn.disabled = true;
+        reorganizeResult.textContent = 'Reorganizing… classifying each note with the configured chat model, so it can take a while.';
+        try {
+            const res = await fetch('/api/v1/notes/reorganize', { method: 'POST' });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const r = await res.json();
+            reorganizeResult.textContent =
+                `Classified ${r.classified} note(s) — moved ${r.moved}, ` +
+                `${r.unchanged} left unchanged` +
+                (r.failed ? `, ${r.failed} failed to classify.` : '.');
+        } catch (err) {
+            reorganizeResult.textContent = 'Reorganize failed: ' + err.message;
+        } finally {
+            reorganizeBtn.disabled = false;
         }
     });
 }

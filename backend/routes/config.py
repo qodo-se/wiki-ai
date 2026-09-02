@@ -1,7 +1,10 @@
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator
 
 import config as config_store
+from config import resolves_to_link_local
 
 router = APIRouter(prefix="/api/v1/config", tags=["config"])
 
@@ -11,10 +14,17 @@ URL_FIELDS = {"ollama_url", "qdrant_url"}
 class ConfigBody(BaseModel):
     ollama_url: str | None = None
     ollama_embedding_model: str | None = None
+    ollama_chat_model: str | None = None
     qdrant_url: str | None = None
     qdrant_collection: str | None = None
 
-    @field_validator("ollama_url", "qdrant_url", "ollama_embedding_model", "qdrant_collection")
+    @field_validator(
+        "ollama_url",
+        "qdrant_url",
+        "ollama_embedding_model",
+        "ollama_chat_model",
+        "qdrant_collection",
+    )
     @classmethod
     def _not_blank(cls, v, info):
         if v is None:
@@ -22,8 +32,14 @@ class ConfigBody(BaseModel):
         v = v.strip()
         if not v:
             raise ValueError(f"{info.field_name} cannot be blank")
-        if info.field_name in URL_FIELDS and not (v.startswith("http://") or v.startswith("https://")):
-            raise ValueError(f"{info.field_name} must start with http:// or https://")
+        if info.field_name in URL_FIELDS:
+            if not (v.startswith("http://") or v.startswith("https://")):
+                raise ValueError(f"{info.field_name} must start with http:// or https://")
+            hostname = urlparse(v).hostname
+            if not hostname:
+                raise ValueError(f"{info.field_name} must include a host")
+            if resolves_to_link_local(hostname):
+                raise ValueError(f"{info.field_name} may not point to a link-local address")
         return v
 
 

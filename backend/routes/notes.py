@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
+from categorize import ReorganizeInProgress, reorganize_notes
 from db import connect
 from embeddings import EmbeddingError, embed_text
 from vectorstore import VectorStoreError, delete_vector, upsert_vector
@@ -132,3 +133,11 @@ def delete_note(uuid: str):
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="note not found")
     _delete_embedding(uuid)
+
+
+@router.post("/reorganize")
+def reorganize():
+    try:
+        return reorganize_notes()
+    except ReorganizeInProgress:
+        raise HTTPException(status_code=409, detail="a reorganize run is already in progress")
