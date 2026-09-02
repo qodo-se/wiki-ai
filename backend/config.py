@@ -26,8 +26,6 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-urllib.request.install_opener(urllib.request.build_opener(_NoRedirectHandler))
-
 
 def _is_link_local(raw_ip: str) -> bool:
     ip = ipaddress.ip_address(raw_ip)
