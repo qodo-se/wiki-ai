@@ -3,11 +3,12 @@ import uuid as uuidlib
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from categorize import ReorganizeInProgress, reorganize_notes
 from db import connect
 from embeddings import EmbeddingError, embed_text
+from paths import normalize_path
 from vectorstore import VectorStoreError, delete_vector, upsert_vector
 
 router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
@@ -35,6 +36,11 @@ PATH_PATTERN = r"^[A-Za-z0-9 _./-]*$"
 class NoteBody(BaseModel):
     content: str
     path: str = Field(default="/", max_length=200, pattern=PATH_PATTERN)
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def _normalize_path(cls, v):
+        return normalize_path(v) if isinstance(v, str) else v
 
 
 class NoteSummary(BaseModel):
