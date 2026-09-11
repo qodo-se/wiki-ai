@@ -2,7 +2,7 @@ import json
 import urllib.error
 import urllib.request
 
-from config import get_all_config
+from config import UnsafeConfigURLError, assert_url_is_safe, get_all_config
 
 
 class EmbeddingError(Exception):
@@ -17,9 +17,10 @@ def embed_text(text: str) -> list[float]:
         url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
     )
     try:
+        assert_url_is_safe(url)
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.load(resp)
-    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+    except (urllib.error.URLError, TimeoutError, ValueError, UnsafeConfigURLError) as e:
         # ValueError also covers urllib rejecting a malformed/unsupported URL
         # and json.JSONDecodeError (a ValueError subclass) on a non-JSON body.
         raise EmbeddingError(f"could not reach Ollama at {cfg['ollama_url']}: {e}") from e
