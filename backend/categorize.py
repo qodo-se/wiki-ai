@@ -225,13 +225,13 @@ def reorganize_notes() -> dict:
             if final_path == note["path"]:
                 unchanged += 1
             else:
-                updates.append((final_path, note_id))
-                moved += 1
+                updates.append((final_path, note_id, note["path"]))
+                pass
 
         if updates:
             with connect() as db:
-                db.executemany(
-                    "UPDATE notes SET path = ?, updated_at = datetime('now') WHERE id = ?", updates
+                cursor = db.executemany(
+                    "UPDATE notes SET path = ?, updated_at = datetime('now') WHERE id = ? AND path = ?", updates
                 )
 
         return {
