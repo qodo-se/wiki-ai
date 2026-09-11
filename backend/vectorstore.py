@@ -75,6 +75,13 @@ def upsert_vector(point_id: str, vector: list[float], payload: dict | None = Non
         raise VectorStoreError(f"could not upsert vector: {resp}")
 
 
+def delete_collection() -> None:
+    _, collection = _cfg()
+    status, resp = _request("DELETE", f"/collections/{collection}")
+    if status not in (200, 404):  # 404: already gone, nothing to do
+        raise VectorStoreError(f"could not delete Qdrant collection: {resp}")
+
+
 def delete_vector(point_id: str) -> None:
     _, collection = _cfg()
     status, resp = _request(
