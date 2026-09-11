@@ -1,13 +1,23 @@
 import pathlib
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+
+from db import connect
 from fastapi.responses import FileResponse
 
 from routes import config, notes, search
 
 STATIC_DIR = pathlib.Path("/app/static")
 
-app = FastAPI(title="wiki")
+@asynccontextmanager
+async def lifespan(_app):
+    with connect():
+        pass
+    yield
+
+
+app = FastAPI(title="wiki", lifespan=lifespan)
 app.include_router(notes.router)
 app.include_router(search.router)
 app.include_router(config.router)
