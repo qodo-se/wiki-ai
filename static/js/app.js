@@ -194,6 +194,7 @@ async function renderHome() {
         titleBtn.className = `${CLS.toggleBtn} ${mode === 'title' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
         pathBtn.className = `${CLS.toggleBtn} ${mode === 'path' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
         if (mode === 'path') {
+            ++currentReqId; // invalidate any in-flight paginated request
             // Not paginated — the whole point is to show every note's path at once.
             prevBtn.disabled = true;
             nextBtn.disabled = true;
@@ -213,10 +214,10 @@ async function renderHome() {
         const reqId = ++currentReqId;
         try {
             const res = await fetch(`/api/v1/notes?limit=${PAGE_SIZE}&offset=${nextOffset}`);
-            if (reqId !== currentReqId) return; // stale — a newer page request won the race
+            if (reqId !== currentReqId || mode !== 'title') return; // stale or path mode — a newer page request won the race
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const data = await res.json();
-            if (reqId !== currentReqId) return; // stale
+            if (reqId !== currentReqId || mode !== 'title') return; // stale or path mode
 
             // Requested page is past the last valid one (e.g. notes were
             // deleted elsewhere since the last load) — clamp back instead of
@@ -238,7 +239,7 @@ async function renderHome() {
             prevBtn.disabled = offset === 0;
             nextBtn.disabled = shownTo >= total;
         } catch (err) {
-            if (reqId !== currentReqId) return; // stale
+            if (reqId !== currentReqId || mode !== 'title') return; // stale or path mode
             list.innerHTML = `<div class="${CLS.error}">Failed to load notes: ${escapeHtml(err.message)}</div>`;
             pageInfo.textContent = '';
             prevBtn.disabled = true;
@@ -385,10 +386,10 @@ async function renderSearch() {
         const reqId = ++currentReqId;
         try {
             const res = await fetch(ENDPOINTS[mode] + '?q=' + encodeURIComponent(q) + '&limit=10');
-            if (reqId !== currentReqId) return; // stale
+            if (reqId !== currentReqId || mode !== 'title') return; // stale or path mode
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const hits = await res.json();
-            if (reqId !== currentReqId) return; // stale
+            if (reqId !== currentReqId || mode !== 'title') return; // stale or path mode
             if (!hits.length) {
                 results.innerHTML = `<li class="${CLS.notice}">No notes match "${escapeHtml(q)}".</li>`;
                 return;
