@@ -139,12 +139,74 @@ async function renderHome() {
     let offset = 0;
     let total = 0;
     let currentReqId = 0;
+    // "By Path" groups across every note, not just one page — fetched in full and
+    // cached here, separately from the paginated "By Title" state above. Without
+    // this, two notes sharing a path could land on different 10-note pages and
+    // never appear grouped together.
+    let allNotes = null;
+    let allNotesReqId = 0;
+
+    async function fetchAllNotes() {
+        const fetched = [];
+        let fetchOffset = 0;
+        for (;;) {
+            const res = await fetch(`/api/v1/notes?limit=100&offset=${fetchOffset}`);
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const data = await res.json();
+            fetched.push(...data.items);
+            if (data.items.length === 0 || fetched.length >= data.total) break;
+            fetchOffset += data.items.length;
+        }
+        return fetched;
+    }
+
+    async function showAllByPath() {
+        if (allNotes !== null) {
+            // Already have the full set from a prior "By Path" visit this session.
+            renderNoteList(list, allNotes, 'path');
+            pageInfo.textContent = allNotes.length === 0
+                ? 'No notes'
+                : `${allNotes.length} note${allNotes.length === 1 ? '' : 's'}, grouped by path`;
+            return;
+        }
+        const reqId = ++allNotesReqId;
+        list.innerHTML = `<div class="${CLS.notice}">Loading…</div>`;
+        pageInfo.textContent = 'Loading…';
+        prevBtn.disabled = true;
+        nextBtn.disabled = true;
+        try {
+            const fetched = await fetchAllNotes();
+            if (reqId !== allNotesReqId) return; // stale — user switched away
+            allNotes = fetched;
+            renderNoteList(list, allNotes, 'path');
+            pageInfo.textContent = allNotes.length === 0
+                ? 'No notes'
+                : `${allNotes.length} note${allNotes.length === 1 ? '' : 's'}, grouped by path`;
+        } catch (err) {
+            if (reqId !== allNotesReqId) return; // stale
+            list.innerHTML = `<div class="${CLS.error}">Failed to load notes: ${escapeHtml(err.message)}</div>`;
+            pageInfo.textContent = '';
+        }
+    }
 
     function setMode(next) {
         mode = next;
         titleBtn.className = `${CLS.toggleBtn} ${mode === 'title' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
         pathBtn.className = `${CLS.toggleBtn} ${mode === 'path' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
+        if (mode === 'path') {
+            // Not paginated — the whole point is to show every note's path at once.
+            prevBtn.disabled = true;
+            nextBtn.disabled = true;
+            showAllByPath();
+            return;
+        }
+        ++allNotesReqId; // cancel any in-flight full fetch, it's no longer relevant
         renderNoteList(list, notes, mode);
+        const shownFrom = total === 0 ? 0 : offset + 1;
+        const shownTo = offset + notes.length;
+        pageInfo.textContent = total === 0 ? 'No notes' : `${shownFrom}–${shownTo} of ${total}`;
+        prevBtn.disabled = offset === 0;
+        nextBtn.disabled = shownTo >= total;
     }
 
     async function loadPage(nextOffset) {
@@ -167,6 +229,7 @@ async function renderHome() {
             notes = data.items;
             offset = data.offset;
             total = data.total;
+            allNotes = null; // the full-set cache used by "By Path" is now stale
             renderNoteList(list, notes, mode);
 
             const shownFrom = total === 0 ? 0 : offset + 1;
