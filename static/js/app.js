@@ -477,6 +477,17 @@ async function renderSettings() {
             </div>
             <p id="reorganize-result" class="${CLS.fieldHelp} mt-2"></p>
         </div>
+        <hr class="my-6 border-gray-200" />
+        <div>
+            <h3 class="text-base font-semibold text-gray-800 mb-1">Reindex search</h3>
+            <p class="${CLS.fieldHelp} mb-3">Rebuilds the semantic search index from scratch: drops and re-embeds every note using the Ollama settings above. Use this if Qdrant's data is lost, out of date, or was reset independently of the notes database.</p>
+            <div class="flex items-center gap-3">
+                <button id="reindex-btn" class="${CLS.primaryBtn}">Reindex search</button>
+            </div>
+            <p id="reindex-result" class="${CLS.fieldHelp} mt-2"></p>
+        </div>
+        <hr class="my-6 border-gray-200" />
+        <p id="version-footer" class="text-gray-400 text-xs"></p>
     `;
 
     document.getElementById('settings-form').addEventListener('submit', async (e) => {
@@ -522,6 +533,32 @@ async function renderSettings() {
             reorganizeBtn.disabled = false;
         }
     });
+
+    const reindexBtn = document.getElementById('reindex-btn');
+    const reindexResult = document.getElementById('reindex-result');
+    reindexBtn.addEventListener('click', async () => {
+        reindexBtn.disabled = true;
+        reindexResult.textContent = 'Reindexing… dropping and rebuilding the vector index, so it can take a while.';
+        try {
+            const res = await fetch('/api/v1/search/reindex', { method: 'POST' });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const r = await res.json();
+            reindexResult.textContent =
+                `Embedded ${r.embedded} of ${r.total} note(s)` +
+                (r.failed ? `, ${r.failed} failed.` : '.');
+        } catch (err) {
+            reindexResult.textContent = 'Reindex failed: ' + err.message;
+        } finally {
+            reindexBtn.disabled = false;
+        }
+    });
+
+    fetch('/api/v1/version')
+        .then(res => res.ok ? res.json() : null)
+        .then(v => {
+            if (v) document.getElementById('version-footer').textContent = `wiki v${v.version}`;
+        })
+        .catch(() => {});
 }
 
 function route() {

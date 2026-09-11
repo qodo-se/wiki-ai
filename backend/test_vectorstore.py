@@ -96,6 +96,28 @@ def test_search_vectors_rejects_response_missing_result_key():
             assert False, "expected VectorStoreError"
 
 
+def test_delete_collection_treats_missing_collection_as_success():
+    config.set_config({"qdrant_url": "http://qdrant-test:6333", "qdrant_collection": "notes"})
+
+    def fake_urlopen(req, timeout=30):
+        assert req.get_method() == "DELETE"
+        raise _http_error(req.full_url, 404, {})
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        vectorstore.delete_collection()  # must not raise
+
+
+def test_delete_collection_raises_on_error_status():
+    config.set_config({"qdrant_url": "http://qdrant-test:6333", "qdrant_collection": "notes"})
+    with patch("urllib.request.urlopen", return_value=_FakeResp(500, {"status": "error"})):
+        try:
+            vectorstore.delete_collection()
+        except vectorstore.VectorStoreError:
+            pass
+        else:
+            assert False, "expected VectorStoreError"
+
+
 def test_request_survives_non_json_error_body():
     config.set_config({"qdrant_url": "http://qdrant-test:6333", "qdrant_collection": "notes"})
 
