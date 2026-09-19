@@ -184,38 +184,45 @@ func (c *client) putNote(id, content, path string) error {
 // application/json — a multipart body needs its own boundary-specific
 // Content-Type header instead.
 func (c *client) uploadImage(noteID, path, mimeType string) (string, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
+	defer file.Close()
 
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
+	reader, writer := io.Pipe()
+	w := multipart.NewWriter(writer)
+	writeErr := make(chan error, 1)
+	go func() {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, quoteEscape(filepath.Base(path))))
+		header.Set("Content-Type", mimeType)
+		part, err := w.CreatePart(header)
+		if err == nil {
+			_, err = io.Copy(part, file)
+		}
+		if err == nil {
+			err = w.WriteField("note_id", noteID)
+		}
+		if err == nil {
+			err = w.Close()
+		} else {
+			_ = writer.CloseWithError(err)
+		}
+		writeErr <- err
+	}()
 
-	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, quoteEscape(filepath.Base(path))))
-	header.Set("Content-Type", mimeType)
-	part, err := w.CreatePart(header)
-	if err != nil {
-		return "", err
-	}
-	if _, err := part.Write(data); err != nil {
-		return "", err
-	}
-	if err := w.WriteField("note_id", noteID); err != nil {
-		return "", err
-	}
-	if err := w.Close(); err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/api/v1/images", &buf)
+	/* The multipart writer runs concurrently so the image is never buffered in memory. */
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/api/v1/images", reader)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", w.FormDataContentType())
 
-	resp, err := c.http.Do(req)
+	// Large uploads need a timeout separate from ordinary API calls.
+	uploadHTTP := *c.http
+	uploadHTTP.Timeout = 10 * time.Minute
+	resp, err := uploadHTTP.Do(req)
 	if err != nil {
 		return "", err
 	}
