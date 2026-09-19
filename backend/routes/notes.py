@@ -138,6 +138,7 @@ def delete_note(uuid: str):
         cursor = db.execute("DELETE FROM notes WHERE id = ?", (uuid,))
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="note not found")
+        db.execute("DELETE FROM images WHERE note_id = ?", (uuid,))
     _delete_embedding(uuid)
 
 

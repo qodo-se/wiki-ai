@@ -299,7 +299,26 @@ async function renderNote(noteId) {
         initialEditType: 'markdown',
         previewStyle: window.matchMedia('(min-width: 768px)').matches ? 'vertical' : 'tab',
         initialValue: initialContent,
-        usageStatistics: false
+        usageStatistics: false,
+        hooks: {
+            // Without this hook, TOAST UI's default behavior is to inline pasted/dropped
+            // images as base64 data URIs directly in the markdown text. This uploads the
+            // blob to our own storage instead and inserts a normal `![alt](url)` markdown
+            // image pointing at it.
+            addImageBlobHook: async (blob, callback) => {
+                try {
+                    const form = new FormData();
+                    form.append('file', blob, blob.name || 'image');
+                    form.append('note_id', noteId);
+                    const res = await fetch('/api/v1/images', { method: 'POST', body: form });
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    const { url } = await res.json();
+                    callback(url, blob.name || 'image');
+                } catch (err) {
+                    alert('Image upload failed: ' + err.message);
+                }
+            }
+        }
     });
 
     fetch(apiUrl + '/meta')

@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS config (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS images (
+    id         TEXT PRIMARY KEY,
+    note_id    TEXT NOT NULL,
+    filename   TEXT NOT NULL DEFAULT '',
+    mime_type  TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    data       BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 def _normalize_existing_note_paths(conn: sqlite3.Connection) -> None:
