@@ -125,6 +125,51 @@ def _prune_old_backups() -> None:
         os.remove(stale)
 
 
+# The on-demand manual backup is a single fixed file, always overwritten — no
+# history, no timestamps, nothing to prune. Deliberately separate from the
+# automatic pre-migration snapshots above (different lock, different naming):
+# those exist to protect a schema upgrade specifically, this exists so a
+# person can click one button and get one file. Keeping them independent
+# means neither has to reason about the other's locking or retention.
+MANUAL_BACKUP_FILENAME = "manual-backup.db"
+_manual_backup_lock = threading.Lock()
+
+
+def manual_backup_path() -> str:
+    return os.path.join(_backup_dir(), MANUAL_BACKUP_FILENAME)
+
+
+def try_create_manual_backup() -> bool:
+    """Overwrites the single manual backup file with a fresh snapshot. Returns
+    False immediately, without blocking, if a backup is already in progress —
+    callers should treat that as "try again shortly", not queue behind it."""
+    if not _manual_backup_lock.acquire(blocking=False):
+        return False
+    try:
+        os.makedirs(_backup_dir(), exist_ok=True)
+        dest_path = manual_backup_path()
+        # Staging file + rename so a backup that fails partway through can't
+        # leave a truncated file where a good one previously was.
+        staging_path = dest_path + ".tmp"
+        source = sqlite3.connect(DB_PATH, timeout=CONNECT_TIMEOUT_SECONDS)
+        try:
+            dest = sqlite3.connect(staging_path, timeout=CONNECT_TIMEOUT_SECONDS)
+            try:
+                source.backup(dest)  # safe under WAL, unlike a raw file copy
+            finally:
+                dest.close()
+        except Exception:
+            if os.path.exists(staging_path):
+                os.remove(staging_path)
+            raise
+        finally:
+            source.close()
+        os.rename(staging_path, dest_path)
+        return True
+    finally:
+        _manual_backup_lock.release()
+
+
 def _backup_before_migration(current_version: int, db_existed: bool) -> None:
     if not db_existed:
         return  # fresh install, nothing to protect

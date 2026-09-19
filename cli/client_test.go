@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -183,6 +185,241 @@ func TestPutNoteNotFound(t *testing.T) {
 
 	if err := newClient(srv.URL).putNote("missing", "content", "/"); err == nil {
 		t.Fatal("expected an error updating a note that doesn't exist (update is not upsert)")
+	}
+}
+
+func TestCreateBackupParsesFilenameAndSize(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v1/backup" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"filename": "manual-backup.db", "size": 4096})
+	}))
+	defer srv.Close()
+
+	meta, err := newClient(srv.URL).createBackup()
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if meta.Filename != "manual-backup.db" || meta.Size != 4096 {
+		t.Fatalf("unexpected meta: %+v", meta)
+	}
+}
+
+func TestCreateBackupReturnsAPIErrorWhenOneIsAlreadyInProgress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"detail":"a backup is already in progress"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := newClient(srv.URL).createBackup(); err == nil {
+		t.Fatal("expected an error for a 409 response")
+	}
+}
+
+func TestDownloadBackupSavesToExplicitPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/backup" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="manual-backup.db"`)
+		w.Write([]byte("fake-sqlite-bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.db")
+	saved, err := newClient(srv.URL).downloadBackup(dest)
+	if err != nil {
+		t.Fatalf("downloadBackup: %v", err)
+	}
+	if saved != dest {
+		t.Fatalf("saved = %q, want %q", saved, dest)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("reading saved file: %v", err)
+	}
+	if string(data) != "fake-sqlite-bytes" {
+		t.Fatalf("data = %q", data)
+	}
+}
+
+func TestDownloadBackupDerivesFilenameFromContentDisposition(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", `attachment; filename="manual-backup.db"`)
+		w.Write([]byte("bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+
+	saved, err := newClient(srv.URL).downloadBackup("")
+	if err != nil {
+		t.Fatalf("downloadBackup: %v", err)
+	}
+	if saved != "manual-backup.db" {
+		t.Fatalf("saved = %q, want the server-suggested filename", saved)
+	}
+	if _, err := os.Stat(filepath.Join(dir, saved)); err != nil {
+		t.Fatalf("expected file to exist: %v", err)
+	}
+}
+
+func TestDownloadBackupOverwritesAnExistingFileOfTheSameAutoDerivedName(t *testing.T) {
+	// The server always names it "manual-backup.db" — running this twice from
+	// the same directory is expected to just overwrite, matching the server's
+	// own single-file, no-history design. No "refuse to clobber" check here.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", `attachment; filename="manual-backup.db"`)
+		w.Write([]byte("new-bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+
+	if err := os.WriteFile("manual-backup.db", []byte("old-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := newClient(srv.URL).downloadBackup(""); err != nil {
+		t.Fatalf("downloadBackup: %v", err)
+	}
+	data, err := os.ReadFile("manual-backup.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "new-bytes" {
+		t.Fatalf("data = %q, want the new content to have overwritten the old", data)
+	}
+}
+
+func TestDownloadBackupStripsPathTraversalFromServerFilename(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A malicious or compromised server suggesting an absolute path / parent
+		// traversal must not make the CLI write outside the current directory.
+		w.Header().Set("Content-Disposition", `attachment; filename="../../etc/evil.db"`)
+		w.Write([]byte("bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+
+	saved, err := newClient(srv.URL).downloadBackup("")
+	if err != nil {
+		t.Fatalf("downloadBackup: %v", err)
+	}
+	if saved != "evil.db" {
+		t.Fatalf("saved = %q, want the traversal stripped down to the base filename", saved)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "evil.db")); err != nil {
+		t.Fatalf("expected file inside the working directory: %v", err)
+	}
+}
+
+func TestDownloadBackupLeavesExistingFileIntactOnFailedCopy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Declares far more bytes than it actually sends, so the client's
+		// io.Copy fails partway through — simulating a dropped connection.
+		w.Header().Set("Content-Length", "1000000")
+		w.Write([]byte("partial"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "existing.db")
+	if err := os.WriteFile(dest, []byte("original-good-backup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := newClient(srv.URL).downloadBackup(dest); err == nil {
+		t.Fatal("expected an error from a truncated response body")
+	}
+
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("original file should still exist: %v", err)
+	}
+	if string(data) != "original-good-backup" {
+		t.Fatalf("original file was modified by the failed download: %q", data)
+	}
+	leftovers, _ := filepath.Glob(dest + ".*.download-tmp")
+	if len(leftovers) != 0 {
+		t.Fatalf("staging file should have been cleaned up, found: %v", leftovers)
+	}
+}
+
+func TestDownloadBackupDoesNotFollowSymlinkAtPredictableStagingName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("new-bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.db")
+	canary := filepath.Join(dir, "canary-sensitive-file")
+	if err := os.WriteFile(canary, []byte("do-not-touch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Plants a symlink at the naive fixed staging name ("<dest>.download-tmp")
+	// pointing at a sensitive file. If the code used that fixed name, os.Create
+	// would follow the symlink and truncate the canary in place — the point of
+	// os.CreateTemp's randomized name is that an attacker can't know what name
+	// to plant a symlink at.
+	if err := os.Symlink(canary, dest+".download-tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := newClient(srv.URL).downloadBackup(dest); err != nil {
+		t.Fatalf("downloadBackup: %v", err)
+	}
+
+	data, err := os.ReadFile(canary)
+	if err != nil {
+		t.Fatalf("canary file should still exist untouched: %v", err)
+	}
+	if string(data) != "do-not-touch" {
+		t.Fatalf("canary file was modified — a predictable staging path was followed: %q", data)
+	}
+}
+
+func TestDownloadBackupReturnsAPIErrorWhenNoneExists(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"detail":"no backup has been created yet"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := newClient(srv.URL).downloadBackup(filepath.Join(t.TempDir(), "out.db")); err == nil {
+		t.Fatal("expected an error for a 404 response")
 	}
 }
 

@@ -35,6 +35,8 @@ func main() {
 		runSearch(args)
 	case "search-semantic":
 		runSemanticSearch(args)
+	case "backup":
+		runBackup(args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -61,6 +63,9 @@ Commands:
   search-semantic <query>
                        search notes by meaning, via embeddings (requires
                        Ollama + Qdrant configured server-side)
+  backup [output-path]
+                       trigger a server-side backup and download it (default
+                       output filename comes from the server)
 
 list flags:
   --limit int    max number of notes to return per page (default 10)
@@ -270,6 +275,28 @@ func runSearch(args []string) {
 	for _, h := range hits {
 		fmt.Printf("%s  %-30s %-20s %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), sanitizeForTerminal(h.Preview))
 	}
+}
+
+func runBackup(args []string) {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	urlFlag := addURLFlag(fs)
+	fs.Parse(args)
+	url := *urlFlag
+
+	outPath := ""
+	if fs.NArg() > 0 {
+		outPath = fs.Arg(0)
+	}
+
+	c := newClient(url)
+	if _, err := c.createBackup(); err != nil {
+		fail(err)
+	}
+	saved, err := c.downloadBackup(outPath)
+	if err != nil {
+		fail(err)
+	}
+	fmt.Println(saved)
 }
 
 func runSemanticSearch(args []string) {
