@@ -487,6 +487,16 @@ async function renderSettings() {
             <p id="reindex-result" class="${CLS.fieldHelp} mt-2"></p>
         </div>
         <hr class="my-6 border-gray-200" />
+        <div>
+            <h3 class="text-base font-semibold text-gray-800 mb-1">Backup</h3>
+            <p class="${CLS.fieldHelp} mb-3">Creates a point-in-time snapshot of the notes database, safe to take while the app is running. Download it and store it somewhere else — creating a backup here only keeps the most recent snapshots on the server, it isn't a substitute for an off-server copy.</p>
+            <div class="flex items-center gap-3">
+                <button id="backup-btn" class="${CLS.primaryBtn}">Create backup</button>
+                <a href="/api/v1/backup/latest" class="${CLS.pageBtn}">Download latest backup</a>
+            </div>
+            <p id="backup-result" class="${CLS.fieldHelp} mt-2"></p>
+        </div>
+        <hr class="my-6 border-gray-200" />
         <p id="version-footer" class="text-gray-400 text-xs"></p>
     `;
 
@@ -550,6 +560,24 @@ async function renderSettings() {
             reindexResult.textContent = 'Reindex failed: ' + err.message;
         } finally {
             reindexBtn.disabled = false;
+        }
+    });
+
+    const backupBtn = document.getElementById('backup-btn');
+    const backupResult = document.getElementById('backup-result');
+    backupBtn.addEventListener('click', async () => {
+        backupBtn.disabled = true;
+        backupResult.textContent = 'Creating backup…';
+        try {
+            const res = await fetch('/api/v1/backup', { method: 'POST' });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const r = await res.json();
+            const sizeKb = (r.size / 1024).toFixed(1);
+            backupResult.textContent = `Created ${r.filename} (${sizeKb} KB).`;
+        } catch (err) {
+            backupResult.textContent = 'Backup failed: ' + err.message;
+        } finally {
+            backupBtn.disabled = false;
         }
     });
 

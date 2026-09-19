@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -183,6 +185,127 @@ func TestPutNoteNotFound(t *testing.T) {
 
 	if err := newClient(srv.URL).putNote("missing", "content", "/"); err == nil {
 		t.Fatal("expected an error updating a note that doesn't exist (update is not upsert)")
+	}
+}
+
+func TestCreateBackupParsesFilenameAndSize(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v1/backup" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"filename": "wiki-v1-20260919T000000Z.db", "size": 4096})
+	}))
+	defer srv.Close()
+
+	meta, err := newClient(srv.URL).createBackup()
+	if err != nil {
+		t.Fatalf("createBackup: %v", err)
+	}
+	if meta.Filename != "wiki-v1-20260919T000000Z.db" || meta.Size != 4096 {
+		t.Fatalf("unexpected meta: %+v", meta)
+	}
+}
+
+func TestDownloadLatestBackupSavesToExplicitPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/backup/latest" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="wiki-v1-20260919T000000Z.db"`)
+		w.Write([]byte("fake-sqlite-bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.db")
+	saved, err := newClient(srv.URL).downloadLatestBackup(dest)
+	if err != nil {
+		t.Fatalf("downloadLatestBackup: %v", err)
+	}
+	if saved != dest {
+		t.Fatalf("saved = %q, want %q", saved, dest)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("reading saved file: %v", err)
+	}
+	if string(data) != "fake-sqlite-bytes" {
+		t.Fatalf("data = %q", data)
+	}
+}
+
+func TestDownloadLatestBackupDerivesFilenameFromContentDisposition(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", `attachment; filename="wiki-v2-20260919T010203Z.db"`)
+		w.Write([]byte("bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+
+	saved, err := newClient(srv.URL).downloadLatestBackup("")
+	if err != nil {
+		t.Fatalf("downloadLatestBackup: %v", err)
+	}
+	if saved != "wiki-v2-20260919T010203Z.db" {
+		t.Fatalf("saved = %q, want the server-suggested filename", saved)
+	}
+	if _, err := os.Stat(filepath.Join(dir, saved)); err != nil {
+		t.Fatalf("expected file to exist: %v", err)
+	}
+}
+
+func TestDownloadLatestBackupStripsPathTraversalFromServerFilename(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A malicious or compromised server suggesting an absolute path / parent
+		// traversal must not make the CLI write outside the current directory.
+		w.Header().Set("Content-Disposition", `attachment; filename="../../etc/evil.db"`)
+		w.Write([]byte("bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+
+	saved, err := newClient(srv.URL).downloadLatestBackup("")
+	if err != nil {
+		t.Fatalf("downloadLatestBackup: %v", err)
+	}
+	if saved != "evil.db" {
+		t.Fatalf("saved = %q, want the traversal stripped down to the base filename", saved)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "evil.db")); err != nil {
+		t.Fatalf("expected file inside the working directory: %v", err)
+	}
+}
+
+func TestDownloadLatestBackupReturnsAPIErrorWhenNoneExists(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"detail":"no backup has been created yet"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := newClient(srv.URL).downloadLatestBackup(filepath.Join(t.TempDir(), "out.db")); err == nil {
+		t.Fatal("expected an error for a 404 response")
 	}
 }
 

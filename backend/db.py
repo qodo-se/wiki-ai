@@ -125,6 +125,29 @@ def _prune_old_backups() -> None:
         os.remove(stale)
 
 
+def latest_backup_path() -> str | None:
+    backups = sorted(
+        glob.glob(os.path.join(_backup_dir(), "wiki-v*.db")), key=os.path.getmtime
+    )
+    return backups[-1] if backups else None
+
+
+def create_backup_now() -> str:
+    # Reuses _backup_before_migration as-is — it's not actually migration-specific,
+    # it just takes a WAL-safe snapshot into the same retention pool. Calling it
+    # on demand (outside the migration path) is exactly "back up now": same
+    # naming, same pruning, no separate storage/retention concept to maintain.
+    with connect() as conn:
+        current = _current_version(conn)
+    # Reuses _migration_lock (not a separate lock) so an on-demand backup can never
+    # run its staging-file-then-rename sequence concurrently with another on-demand
+    # backup, or with a migration's own call to _backup_before_migration — both
+    # would otherwise race on the same second-resolution staging path.
+    with _migration_lock:
+        _backup_before_migration(current, db_existed=True)
+    return latest_backup_path()
+
+
 def _backup_before_migration(current_version: int, db_existed: bool) -> None:
     if not db_existed:
         return  # fresh install, nothing to protect
