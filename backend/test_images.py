@@ -1,7 +1,10 @@
 import base64
+import os
 
 import pytest
 from fastapi.testclient import TestClient
+
+import db
 
 # Smallest possible valid PNG: a single transparent pixel.
 PNG_BYTES = base64.b64decode(
@@ -75,11 +78,14 @@ def test_delete_image_removes_it(client):
         files={"file": ("pixel.png", PNG_BYTES, "image/png")},
         data={"note_id": note_id},
     ).json()
+    on_disk = db.image_path(upload["id"], "image/png")
+    assert os.path.exists(on_disk)
 
     res = client.delete(upload["url"])
     assert res.status_code == 204
     assert client.get(upload["url"]).status_code == 404
     assert client.delete(upload["url"]).status_code == 404
+    assert not os.path.exists(on_disk)
 
 
 def test_deleting_a_note_cascades_to_its_images(client):
@@ -89,7 +95,10 @@ def test_deleting_a_note_cascades_to_its_images(client):
         files={"file": ("pixel.png", PNG_BYTES, "image/png")},
         data={"note_id": note_id},
     ).json()
+    on_disk = db.image_path(upload["id"], "image/png")
+    assert os.path.exists(on_disk)
 
     res = client.delete(f"/api/v1/notes/{note_id}")
     assert res.status_code == 204
     assert client.get(upload["url"]).status_code == 404
+    assert not os.path.exists(on_disk)

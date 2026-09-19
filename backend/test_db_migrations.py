@@ -60,6 +60,57 @@ def test_backup_created_before_migration_runs_against_existing_data(monkeypatch)
     assert row == ("hello", "Note")
 
 
+def test_backup_before_migration_also_copies_images_dir(monkeypatch):
+    monkeypatch.setattr(db, "MIGRATIONS", [])
+    conn = db.connect()
+    conn.execute("INSERT INTO notes (id, content) VALUES ('n1', 'hello')")
+    conn.commit()
+    conn.close()
+
+    os.makedirs(db.IMAGES_DIR)
+    with open(os.path.join(db.IMAGES_DIR, "abc.png"), "wb") as f:
+        f.write(b"fake-bytes")
+
+    monkeypatch.setattr(
+        db, "MIGRATIONS", [(1, ["ALTER TABLE notes ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"])]
+    )
+    db.connect()
+
+    image_backups = glob.glob(os.path.join(db._backup_dir(), "images-v0-*"))
+    assert len(image_backups) == 1
+    with open(os.path.join(image_backups[0], "abc.png"), "rb") as f:
+        assert f.read() == b"fake-bytes"
+
+
+def test_no_images_backup_when_images_dir_does_not_exist(monkeypatch):
+    monkeypatch.setattr(db, "MIGRATIONS", [])
+    conn = db.connect()
+    conn.execute("INSERT INTO notes (id, content) VALUES ('n1', 'hello')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        db, "MIGRATIONS", [(1, ["ALTER TABLE notes ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"])]
+    )
+    db.connect()
+
+    assert glob.glob(os.path.join(db._backup_dir(), "images-v*")) == []
+
+
+def test_image_backup_retention_keeps_only_last_n(monkeypatch):
+    monkeypatch.setattr(db, "MIGRATIONS", [])
+    db.connect()
+    os.makedirs(db.IMAGES_DIR, exist_ok=True)
+    for version in range(1, db.BACKUP_RETENTION + 3):
+        monkeypatch.setattr(
+            db, "MIGRATIONS", [(v, ["SELECT 1"]) for v in range(1, version + 1)]
+        )
+        db.connect()
+
+    image_backups = glob.glob(os.path.join(db._backup_dir(), "images-v*"))
+    assert len(image_backups) == db.BACKUP_RETENTION
+
+
 def test_no_backup_on_fresh_install(monkeypatch):
     monkeypatch.setattr(
         db,
@@ -71,6 +122,10 @@ def test_no_backup_on_fresh_install(monkeypatch):
 
 
 def test_backup_retention_keeps_only_last_n(monkeypatch):
+    # Baseline install at version 0, regardless of how many real migrations
+    # exist — the loop below establishes its own synthetic version history
+    # starting from 1, so the real MIGRATIONS list must not race ahead of it.
+    monkeypatch.setattr(db, "MIGRATIONS", [])
     db.connect()
     for version in range(1, db.BACKUP_RETENTION + 3):
         # MIGRATIONS is always the full cumulative history in production (a new
@@ -212,6 +267,45 @@ def test_path_normalization_migration_collapses_equivalent_paths(monkeypatch):
         "n7": "/recipe/thai",
         "n8": "/recipe/thai",
     }
+
+
+def test_images_to_filesystem_migration_moves_bytes_and_drops_column(monkeypatch):
+    real_migrations = list(db.MIGRATIONS)  # restored below, without touching temp_db's DB_PATH patch
+    monkeypatch.setattr(db, "MIGRATIONS", [])
+    conn = db.connect()
+    conn.execute("INSERT INTO notes (id, content) VALUES ('n1', 'hello')")
+    # BASE_SCHEMA now creates images without a data column (a fresh install never
+    # sees the old shape), so simulate an install that predates this migration by
+    # recreating the table in its old, BLOB-backed shape before inserting into it.
+    conn.execute("DROP TABLE images")
+    conn.execute(
+        """
+        CREATE TABLE images (
+            id TEXT PRIMARY KEY, note_id TEXT NOT NULL, filename TEXT NOT NULL DEFAULT '',
+            mime_type TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO images (id, note_id, filename, mime_type, size, data) "
+        "VALUES ('img1', 'n1', 'pixel.png', 'image/png', 4, ?)",
+        (b"fake",),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "MIGRATIONS", real_migrations)
+    conn = db.connect()
+
+    assert "data" not in _column_names(conn, "images")
+    row = conn.execute(
+        "SELECT note_id, filename, mime_type, size FROM images WHERE id = 'img1'"
+    ).fetchone()
+    assert row == ("n1", "pixel.png", "image/png", 4)
+
+    with open(db.image_path("img1", "image/png"), "rb") as f:
+        assert f.read() == b"fake"
 
 
 def test_failed_migration_rolls_back_partial_changes(monkeypatch):

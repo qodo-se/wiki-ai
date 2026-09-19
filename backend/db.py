@@ -1,12 +1,30 @@
 import datetime
 import glob
 import os
+import shutil
 import sqlite3
 import threading
 
 DB_PATH = "/data/wiki.db"
 BACKUP_RETENTION = 5
 CONNECT_TIMEOUT_SECONDS = 30.0
+
+# Image bytes live as plain files here rather than in wiki.db, so the DB stays
+# small and cheap to back up regardless of how many/how large the images are.
+# A subdirectory of the same /data volume notes already use — no separate
+# Docker mount needed.
+IMAGES_DIR = "/data/images"
+
+MIME_TO_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+
+
+def image_path(image_id: str, mime_type: str) -> str:
+    return os.path.join(IMAGES_DIR, f"{image_id}{MIME_TO_EXT[mime_type]}")
 
 # Serializes migration application across threads within this process. It does not
 # cover multiple processes/containers sharing the same DB file, which is fine given
@@ -45,7 +63,6 @@ CREATE TABLE IF NOT EXISTS images (
     filename   TEXT NOT NULL DEFAULT '',
     mime_type  TEXT NOT NULL,
     size       INTEGER NOT NULL,
-    data       BLOB NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -69,6 +86,56 @@ def _normalize_existing_note_paths(conn: sqlite3.Connection) -> None:
         conn.executemany("UPDATE notes SET path = ? WHERE id = ?", updates)
 
 
+def _move_images_to_filesystem(conn: sqlite3.Connection) -> None:
+    # images used to store bytes directly in a BLOB column; this moves those
+    # bytes out to plain files under IMAGES_DIR (see its comment above) and
+    # drops the column. The file writes below aren't covered by this
+    # migration's SQL transaction/rollback — if a later pending migration in
+    # the same batch fails, already-written files stay on disk even though
+    # the table swap rolls back. Harmless (orphaned files, not corruption),
+    # and a retry is safe: the write is idempotent and the SQL side re-runs
+    # cleanly against the original, untouched table.
+    #
+    # BASE_SCHEMA now creates images directly in the post-migration shape (no
+    # data column), so any install that never ran the pre-migration code —
+    # every fresh install, including every test's temp DB — already has the
+    # final shape by the time this runs. Detect that and no-op instead of
+    # failing on a column that was never there to begin with.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(images)")}
+    if "data" not in columns:
+        return
+
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+    rows = conn.execute(
+        "SELECT id, note_id, filename, mime_type, size, created_at, data FROM images"
+    ).fetchall()
+    for image_id, _note_id, _filename, mime_type, _size, _created_at, data in rows:
+        dest = image_path(image_id, mime_type)
+        if not os.path.exists(dest):
+            with open(dest, "wb") as f:
+                f.write(data)
+
+    conn.execute(
+        """
+        CREATE TABLE images_new (
+            id         TEXT PRIMARY KEY,
+            note_id    TEXT NOT NULL,
+            filename   TEXT NOT NULL DEFAULT '',
+            mime_type  TEXT NOT NULL,
+            size       INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO images_new (id, note_id, filename, mime_type, size, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows],
+    )
+    conn.execute("DROP TABLE images")
+    conn.execute("ALTER TABLE images_new RENAME TO images")
+
+
 # BOOTSTRAP_SCHEMA/BASE_SCHEMA are never backed up before running: every statement in
 # them is an idempotent `CREATE TABLE IF NOT EXISTS`, so they're safe-by-construction
 # against any existing database and can't lose data. Only MIGRATIONS entries (which
@@ -88,6 +155,9 @@ MIGRATIONS: list[tuple[int, list]] = [
     # existed (e.g. "/recipe/" or "/recipe " next to "/recipe") group correctly on
     # the by-path home view instead of appearing as separate paths.
     (1, [_normalize_existing_note_paths]),
+    # Moves image bytes out of the images.data BLOB column and onto disk under
+    # IMAGES_DIR — see _move_images_to_filesystem for why and its caveats.
+    (2, [_move_images_to_filesystem]),
 ]
 
 
@@ -127,12 +197,17 @@ def _current_version(conn: sqlite3.Connection) -> int:
 def _prune_old_backups() -> None:
     # Sort by mtime, not filename — filenames embed an unpadded schema version, so
     # sorting lexicographically would misorder v10 before v9 once versions hit two
-    # digits.
-    backups = sorted(
-        glob.glob(os.path.join(_backup_dir(), "wiki-v*.db")), key=os.path.getmtime
-    )
-    for stale in backups[:-BACKUP_RETENTION]:
-        os.remove(stale)
+    # digits. Trailing "Z" excludes any "*.tmp" staging leftovers from a prior
+    # interrupted backup, the same way "*.db" already does for the DB pattern.
+    for pattern in ("wiki-v*.db", "images-v*Z"):
+        backups = sorted(
+            glob.glob(os.path.join(_backup_dir(), pattern)), key=os.path.getmtime
+        )
+        for stale in backups[:-BACKUP_RETENTION]:
+            if os.path.isdir(stale):
+                shutil.rmtree(stale)
+            else:
+                os.remove(stale)
 
 
 def _backup_before_migration(current_version: int, db_existed: bool) -> None:
@@ -159,6 +234,23 @@ def _backup_before_migration(current_version: int, db_existed: bool) -> None:
     finally:
         source.close()
     os.rename(staging_path, dest_path)
+
+    # Paired with the DB backup above (same version/timestamp) so a restore is a
+    # complete, self-consistent snapshot — a wiki.db backup alone would restore
+    # image metadata pointing at files that may since have changed or been
+    # deleted. Skipped if IMAGES_DIR doesn't exist yet (nothing uploaded, or an
+    # install upgrading from before images existed at all).
+    if os.path.isdir(IMAGES_DIR):
+        images_dest = os.path.join(_backup_dir(), f"images-v{current_version}-{timestamp}")
+        images_staging = images_dest + ".tmp"
+        try:
+            shutil.copytree(IMAGES_DIR, images_staging)
+        except Exception:
+            if os.path.exists(images_staging):
+                shutil.rmtree(images_staging)
+            raise
+        os.rename(images_staging, images_dest)
+
     _prune_old_backups()
 
 

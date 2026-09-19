@@ -1,3 +1,4 @@
+import os
 import sys
 import uuid as uuidlib
 
@@ -6,7 +7,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
 from categorize import ReorganizeInProgress, reorganize_notes
-from db import connect
+from db import connect, image_path
 from embeddings import EmbeddingError, embed_text
 from paths import normalize_path
 from vectorstore import VectorStoreError, delete_vector, upsert_vector
@@ -138,7 +139,14 @@ def delete_note(uuid: str):
         cursor = db.execute("DELETE FROM notes WHERE id = ?", (uuid,))
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="note not found")
+        images = db.execute(
+            "SELECT id, mime_type FROM images WHERE note_id = ?", (uuid,)
+        ).fetchall()
         db.execute("DELETE FROM images WHERE note_id = ?", (uuid,))
+    for image_id, mime_type in images:
+        path = image_path(image_id, mime_type)
+        if os.path.exists(path):
+            os.remove(path)
     _delete_embedding(uuid)
 
 
