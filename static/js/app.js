@@ -492,7 +492,7 @@ async function renderSettings() {
             <p class="${CLS.fieldHelp} mb-3">Creates a point-in-time snapshot of the notes database, safe to take while the app is running. Download it and store it somewhere else — creating a backup here only keeps the most recent snapshots on the server, it isn't a substitute for an off-server copy.</p>
             <div class="flex items-center gap-3">
                 <button id="backup-btn" class="${CLS.primaryBtn}">Create backup</button>
-                <a href="/api/v1/backup/latest" class="${CLS.pageBtn}">Download latest backup</a>
+                <a href="/api/v1/backup/latest" download class="${CLS.pageBtn}">Download latest backup</a>
             </div>
             <p id="backup-result" class="${CLS.fieldHelp} mt-2"></p>
         </div>
