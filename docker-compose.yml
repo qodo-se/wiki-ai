@@ -14,7 +14,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8081:80"
+      - "${API_PORT:-8081}:80"
     depends_on:
       - qdrant
 
