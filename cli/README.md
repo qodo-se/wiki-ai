@@ -46,6 +46,14 @@ echo "hello wiki" | ./wiki-cli create
 # update content and move it to a new path
 ./wiki-cli update --path /docs/new-setup --file notes.md <uuid>
 
+# upload a local image and get back its /api/v1/images/… URL — the note
+# must already exist. The CLI does not scan markdown for image references
+# itself (that's a judgment call — code-fence examples, reference-style
+# links, and HTML <img> tags all need to be told apart from real ones — left
+# to whoever is editing the note, e.g. an agent): paste the printed URL into
+# the note's markdown yourself, e.g. ![alt](<printed url>), before saving it.
+./wiki-cli upload-image --note <uuid> ./photo.png
+
 # delete a note
 ./wiki-cli delete <uuid>
 

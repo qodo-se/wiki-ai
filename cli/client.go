@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -171,6 +175,75 @@ func (c *client) putNote(id, content, path string) error {
 	}
 	_, err = c.do(http.MethodPut, "/api/v1/notes/"+id, nil, payload)
 	return err
+}
+
+// uploadImage uploads the local file at path as an attachment of noteID. The
+// image's Content-Type is set explicitly to mimeType (rather than sniffed)
+// since that's what the server's allowlist checks against. This bypasses
+// do() rather than extending it, since do() always sends
+// application/json — a multipart body needs its own boundary-specific
+// Content-Type header instead.
+func (c *client) uploadImage(noteID, path, mimeType string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, quoteEscape(filepath.Base(path))))
+	header.Set("Content-Type", mimeType)
+	part, err := w.CreatePart(header)
+	if err != nil {
+		return "", err
+	}
+	if _, err := part.Write(data); err != nil {
+		return "", err
+	}
+	if err := w.WriteField("note_id", noteID); err != nil {
+		return "", err
+	}
+	if err := w.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/api/v1/images", &buf)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", &apiError{status: resp.StatusCode, body: string(respBody)}
+	}
+
+	var created struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(respBody, &created); err != nil {
+		return "", err
+	}
+	return created.URL, nil
+}
+
+// quoteEscape escapes a filename for use in a multipart Content-Disposition
+// header — the same escaping mime/multipart applies internally in
+// CreateFormFile, which we can't use here since it hardcodes
+// application/octet-stream instead of letting us set mimeType.
+func quoteEscape(s string) string {
+	return strings.NewReplacer("\\", "\\\\", `"`, "\\\"").Replace(s)
 }
 
 func (c *client) deleteNote(id string) error {

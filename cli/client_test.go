@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -183,6 +186,77 @@ func TestPutNoteNotFound(t *testing.T) {
 
 	if err := newClient(srv.URL).putNote("missing", "content", "/"); err == nil {
 		t.Fatal("expected an error updating a note that doesn't exist (update is not upsert)")
+	}
+}
+
+func TestUploadImageSendsMultipartRequestWithNoteIDAndContentType(t *testing.T) {
+	dir := t.TempDir()
+	imgPath := filepath.Join(dir, "photo.png")
+	if err := os.WriteFile(imgPath, []byte("fake-png-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotNoteID, gotContentType, gotFilename string
+	var gotBytes []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v1/images" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		gotNoteID = r.FormValue("note_id")
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile: %v", err)
+		}
+		defer file.Close()
+		gotContentType = header.Header.Get("Content-Type")
+		gotFilename = header.Filename
+		gotBytes, _ = io.ReadAll(file)
+		json.NewEncoder(w).Encode(map[string]string{"id": "img-id", "url": "/api/v1/images/img-id"})
+	}))
+	defer srv.Close()
+
+	url, err := newClient(srv.URL).uploadImage("note-1", imgPath, "image/png")
+	if err != nil {
+		t.Fatalf("uploadImage: %v", err)
+	}
+	if url != "/api/v1/images/img-id" {
+		t.Fatalf("url = %q, want /api/v1/images/img-id", url)
+	}
+	if gotNoteID != "note-1" {
+		t.Errorf("note_id = %q, want note-1", gotNoteID)
+	}
+	if gotContentType != "image/png" {
+		t.Errorf("content-type = %q, want image/png", gotContentType)
+	}
+	if gotFilename != "photo.png" {
+		t.Errorf("filename = %q, want photo.png", gotFilename)
+	}
+	if string(gotBytes) != "fake-png-bytes" {
+		t.Errorf("bytes = %q, want fake-png-bytes", gotBytes)
+	}
+}
+
+func TestUploadImageReturnsAPIErrorOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	imgPath := filepath.Join(dir, "photo.png")
+	if err := os.WriteFile(imgPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"detail":"note not found"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := newClient(srv.URL).uploadImage("missing", imgPath, "image/png"); err == nil {
+		t.Fatal("expected an error for a 404 response")
 	}
 }
 

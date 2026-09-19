@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 const defaultBaseURL = "http://localhost:8081"
@@ -29,6 +31,8 @@ func main() {
 		runCreate(args)
 	case "update":
 		runUpdate(args)
+	case "upload-image":
+		runUploadImage(args)
 	case "delete":
 		runDelete(args)
 	case "search":
@@ -56,6 +60,10 @@ Commands:
   meta <uuid>          print a note's metadata
   create               create a note (content from --file or stdin)
   update <uuid>        update a note (content from --file or stdin)
+  upload-image --note <uuid> <path>
+                       upload a local image file, print its /api/v1/images/…
+                       URL — paste that URL into the note's markdown yourself
+                       (e.g. ![alt](<printed url>)) before create/update
   delete <uuid>        delete a note
   search <query>       search notes (keyword match)
   search-semantic <query>
@@ -232,6 +240,33 @@ func runUpdate(args []string) {
 		fail(err)
 	}
 	fmt.Println(id)
+}
+
+func runUploadImage(args []string) {
+	fs := flag.NewFlagSet("upload-image", flag.ExitOnError)
+	note := fs.String("note", "", "uuid of the note this image belongs to (required)")
+	urlFlag := addURLFlag(fs)
+	fs.Parse(args)
+	url := *urlFlag
+
+	if *note == "" || fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli upload-image --note <uuid> <path>")
+		os.Exit(1)
+	}
+	noteID := requireUUID(*note)
+	path := fs.Arg(0)
+
+	mimeType, ok := imageExtToMIME[strings.ToLower(filepath.Ext(path))]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "error: unsupported image type %q (supported: .png, .jpg, .jpeg, .gif, .webp)\n", path)
+		os.Exit(1)
+	}
+
+	imgURL, err := newClient(url).uploadImage(noteID, path, mimeType)
+	if err != nil {
+		fail(err)
+	}
+	fmt.Println(imgURL)
 }
 
 func runDelete(args []string) {
