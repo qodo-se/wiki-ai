@@ -10,7 +10,6 @@ router = APIRouter(prefix="/api/v1/images", tags=["images"])
 # SVG is deliberately excluded — it would be served same-origin, and an SVG can carry
 # a <script> that runs with this app's own origin.
 ALLOWED_MIME_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 @router.post("")
@@ -19,8 +18,6 @@ async def create_image(file: UploadFile, note_id: str = Form(...)):
         raise HTTPException(status_code=415, detail="unsupported image type")
 
     data = await file.read()
-    if len(data) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="image too large")
 
     new_id = str(uuidlib.uuid4())
     with connect() as db:

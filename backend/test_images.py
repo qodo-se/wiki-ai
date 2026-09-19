@@ -3,8 +3,6 @@ import base64
 import pytest
 from fastapi.testclient import TestClient
 
-from routes.images import MAX_IMAGE_BYTES
-
 # Smallest possible valid PNG: a single transparent pixel.
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -54,17 +52,6 @@ def test_upload_rejects_disallowed_content_type(client):
         data={"note_id": note_id},
     )
     assert res.status_code == 415
-
-
-def test_upload_rejects_oversized_file(client):
-    note_id = _create_note(client)
-    oversized = b"x" * (MAX_IMAGE_BYTES + 1)
-    res = client.post(
-        "/api/v1/images",
-        files={"file": ("big.png", oversized, "image/png")},
-        data={"note_id": note_id},
-    )
-    assert res.status_code == 413
 
 
 def test_upload_rejects_unknown_note_id(client):
