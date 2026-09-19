@@ -143,9 +143,13 @@ def create_backup_now() -> str:
     # run its staging-file-then-rename sequence concurrently with another on-demand
     # backup, or with a migration's own call to _backup_before_migration — both
     # would otherwise race on the same second-resolution staging path.
-    with _migration_lock:
-        _backup_before_migration(current, db_existed=True)
-    return latest_backup_path()
+    if not _migration_lock.acquire(blocking=False):
+        raise RuntimeError("backup already in progress")
+    try:
+        path = _backup_before_migration(current, db_existed=True)
+    finally:
+        _migration_lock.release()
+    return path
 
 
 def _backup_before_migration(current_version: int, db_existed: bool) -> None:
@@ -173,6 +177,16 @@ def _backup_before_migration(current_version: int, db_existed: bool) -> None:
         source.close()
     os.rename(staging_path, dest_path)
     _prune_old_backups()
+    return dest_path
+
+
+def open_latest_backup():
+    """Open the latest snapshot before retention can prune it."""
+    with _migration_lock:
+        path = latest_backup_path()
+        if path is None:
+            return None, None
+        return path, open(path, "rb")
 
 
 def _check_not_too_new(conn: sqlite3.Connection) -> int:

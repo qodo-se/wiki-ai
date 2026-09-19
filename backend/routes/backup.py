@@ -1,29 +1,29 @@
 import os
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 
-from db import create_backup_now, latest_backup_path
+from db import create_backup_now, open_latest_backup
 
 router = APIRouter(prefix="/api/v1/backup", tags=["backup"])
 
 
 @router.post("")
 def create_backup():
-    path = create_backup_now()
+    try:
+        path = create_backup_now()
+    except RuntimeError:
+        raise HTTPException(status_code=429, detail="backup already in progress")
     return {"filename": os.path.basename(path), "size": os.stat(path).st_size}
 
 
 @router.get("/latest")
 def download_latest_backup():
-    path = latest_backup_path()
+    path, handle = open_latest_backup()
     if path is None:
         raise HTTPException(status_code=404, detail="no backup has been created yet")
-    return FileResponse(
-        path,
+    return StreamingResponse(
+        handle,
         media_type="application/octet-stream",
-        filename=os.path.basename(path),
-        # Backups are mutable/regenerable snapshots, not immutable content like
-        # images — never let a client or intermediary cache "the latest" one.
-        headers={"Cache-Control": "no-store"},
+        headers={"Content-Disposition": f'attachment; filename="{os.path.basename(path)}"', "Cache-Control": "no-store"},
     )
