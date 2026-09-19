@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 import db
-from routes import config, notes, search, version
+from routes import backup, config, notes, search, version
 
 STATIC_DIR = pathlib.Path("/app/static")
 
@@ -18,6 +18,7 @@ app.include_router(notes.router)
 app.include_router(search.router)
 app.include_router(config.router)
 app.include_router(version.router)
+app.include_router(backup.router)
 
 
 @app.get("/{full_path:path}")

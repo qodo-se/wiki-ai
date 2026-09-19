@@ -52,6 +52,11 @@ echo "hello wiki" | ./wiki-cli create
 # search
 ./wiki-cli search --limit 20 "setup"
 
+# trigger a server-side backup and download it — saves under the server's
+# suggested filename by default, or pass your own output path
+./wiki-cli backup
+./wiki-cli backup ./my-backup.db
+
 # point at a different server
 ./wiki-cli list --url http://wiki.example.com
 WIKI_URL=http://wiki.example.com ./wiki-cli list

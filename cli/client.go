@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -14,12 +17,18 @@ import (
 type client struct {
 	baseURL string
 	http    *http.Client
+	// backupHTTP has no timeout, unlike http above — a backup's snapshot-then-
+	// stream round trip scales with database size (which this app deliberately
+	// has no cap on), so a fixed short deadline would abort a legitimately
+	// still-in-progress backup instead of a genuinely hung one.
+	backupHTTP *http.Client
 }
 
 func newClient(baseURL string) *client {
 	return &client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Timeout: 10 * time.Second},
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		http:       &http.Client{Timeout: 10 * time.Second},
+		backupHTTP: &http.Client{},
 	}
 }
 
@@ -34,6 +43,10 @@ func (e *apiError) Error() string {
 }
 
 func (c *client) do(method, path string, query url.Values, body []byte) ([]byte, error) {
+	return c.doWithClient(c.http, method, path, query, body)
+}
+
+func (c *client) doWithClient(httpClient *http.Client, method, path string, query url.Values, body []byte) ([]byte, error) {
 	u := c.baseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -52,7 +65,7 @@ func (c *client) do(method, path string, query url.Values, body []byte) ([]byte,
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +204,101 @@ func (c *client) search(query string, limit int) ([]searchHit, error) {
 		return nil, err
 	}
 	return hits, nil
+}
+
+type backupMeta struct {
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+}
+
+// createBackup triggers the server to overwrite its single backup file with a
+// fresh snapshot. Uses backupHTTP (no timeout), since a snapshot's duration
+// scales with database size, which this app has no cap on — unlike the 10s
+// budget every other (small, fast) request uses.
+func (c *client) createBackup() (*backupMeta, error) {
+	body, err := c.doWithClient(c.backupHTTP, http.MethodPost, "/api/v1/backup", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var meta backupMeta
+	if err := json.Unmarshal(body, &meta); err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+// downloadBackup fetches the current backup and saves it to destPath,
+// returning the path actually written. If destPath is "", the filename is
+// derived from the response's Content-Disposition header. This bypasses do()
+// rather than extending it, since do() always reads the whole body into memory
+// as a JSON response — a backup file should stream straight to disk instead.
+func (c *client) downloadBackup(destPath string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/api/v1/backup", nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := c.backupHTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", &apiError{status: resp.StatusCode, body: string(respBody)}
+	}
+
+	if destPath == "" {
+		// filepath.Base strips any directory components the server (or a
+		// man-in-the-middle) might smuggle into Content-Disposition's filename
+		// (e.g. "../../etc/passwd" or an absolute path) — never trust a
+		// server-supplied filename as a raw local path. The server always
+		// names it "manual-backup.db" today, so running this twice from the
+		// same directory is expected to overwrite, same as the server's own
+		// single-file, no-history design.
+		destPath = filepath.Base(filenameFromContentDisposition(resp.Header.Get("Content-Disposition")))
+		if destPath == "" || destPath == "." || destPath == string(filepath.Separator) {
+			destPath = "wiki-backup.db"
+		}
+	}
+
+	// Write to a staging file and rename into place only once the whole body
+	// has been copied successfully, so a failed/interrupted download can't
+	// leave a truncated file at destPath. os.CreateTemp rather than a fixed
+	// "<destPath>.tmp" name so a predictable staging path can't be pre-planted
+	// with a symlink in a shared/attacker-writable directory.
+	stagingDir := filepath.Dir(destPath)
+	f, err := os.CreateTemp(stagingDir, filepath.Base(destPath)+".*.download-tmp")
+	if err != nil {
+		return "", err
+	}
+	staging := f.Name()
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		os.Remove(staging)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(staging)
+		return "", err
+	}
+	if err := os.Rename(staging, destPath); err != nil {
+		os.Remove(staging)
+		return "", err
+	}
+	return destPath, nil
+}
+
+func filenameFromContentDisposition(header string) string {
+	if header == "" {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(header)
+	if err != nil {
+		return ""
+	}
+	return params["filename"]
 }
 
 func (c *client) semanticSearch(query string, limit int) ([]searchHit, error) {
