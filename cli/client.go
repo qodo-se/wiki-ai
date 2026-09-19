@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -17,12 +18,14 @@ import (
 type client struct {
 	baseURL string
 	http    *http.Client
+	backupHTTP *http.Client
 }
 
 func newClient(baseURL string) *client {
 	return &client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		http:    &http.Client{Timeout: 10 * time.Second},
+		http:       &http.Client{Timeout: 10 * time.Second},
+		backupHTTP: &http.Client{Timeout: 30 * time.Minute},
 	}
 }
 
@@ -37,6 +40,10 @@ func (e *apiError) Error() string {
 }
 
 func (c *client) do(method, path string, query url.Values, body []byte) ([]byte, error) {
+	return c.doWithClient(c.http, method, path, query, body)
+}
+
+func (c *client) doWithClient(httpClient *http.Client, method, path string, query url.Values, body []byte) ([]byte, error) {
 	u := c.baseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -202,7 +209,7 @@ type backupMeta struct {
 }
 
 func (c *client) createBackup() (*backupMeta, error) {
-	body, err := c.do(http.MethodPost, "/api/v1/backup", nil, nil)
+	body, err := c.doWithClient(c.backupHTTP, http.MethodPost, "/api/v1/backup", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +231,7 @@ func (c *client) downloadLatestBackup(destPath string) (string, error) {
 		return "", err
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := c.backupHTTP.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -241,20 +248,21 @@ func (c *client) downloadLatestBackup(destPath string) (string, error) {
 		// (e.g. "../../etc/passwd" or an absolute path) — never trust a
 		// server-supplied filename as a raw local path.
 		destPath = filepath.Base(filenameFromContentDisposition(resp.Header.Get("Content-Disposition")))
-		if destPath == "" || destPath == "." || destPath == string(filepath.Separator) {
+		if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.db$`).MatchString(destPath) {
 			destPath = "wiki-backup.db"
 		}
 	}
 
-	f, err := os.Create(destPath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		return "", err
-	}
+	dir := filepath.Dir(destPath)
+	f, err := os.CreateTemp(dir, ".wiki-backup-*.tmp")
+	if err != nil { return "", err }
+	tmpPath := f.Name()
+	cleanup := true
+	defer func() { if cleanup { os.Remove(tmpPath) } }()
+	if _, err := io.Copy(f, resp.Body); err != nil { f.Close(); return "", err }
+	if err := f.Close(); err != nil { return "", err }
+	if err := os.Rename(tmpPath, destPath); err != nil { return "", err }
+	cleanup = false
 	return destPath, nil
 }
 
