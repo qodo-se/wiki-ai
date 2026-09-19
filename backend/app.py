@@ -1,5 +1,41 @@
 import pathlib
 
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+MAX_REQUEST_BODY = 10 * 1024 * 1024
+
+
+class RequestSizeLimit:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        content_length = scope.get("headers", [])
+        content_length = next((v for k, v in content_length if k.lower() == b"content-length"), None)
+        if content_length is not None and int(content_length) > MAX_REQUEST_BODY:
+            await send({"type": "http.response.start", "status": 413, "headers": []})
+            await send({"type": "http.response.body", "body": b"request body too large"})
+            return
+
+        total = 0
+        rejected = False
+        async def limited_receive() -> Message:
+            nonlocal total, rejected
+            message = await receive()
+            if message["type"] == "http.request" and not rejected:
+                total += len(message.get("body", b""))
+                if total > MAX_REQUEST_BODY:
+                    rejected = True
+                    await send({"type": "http.response.start", "status": 413, "headers": []})
+                    await send({"type": "http.response.body", "body": b"request body too large"})
+                    return {"type": "http.disconnect"}
+            return message
+        await self.app(scope, limited_receive, send)
+
+
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
@@ -14,6 +50,7 @@ STATIC_DIR = pathlib.Path("/app/static")
 db.connect().close()
 
 app = FastAPI(title="wiki")
+app.add_middleware(RequestSizeLimit)
 app.include_router(notes.router)
 app.include_router(images.router)
 app.include_router(search.router)
