@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -434,6 +435,66 @@ func TestDeleteNote(t *testing.T) {
 
 	if err := newClient(srv.URL).deleteNote("my-id"); err != nil {
 		t.Fatalf("deleteNote: %v", err)
+	}
+}
+
+func TestUploadImageSendsFileAsMultipart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "photo.png")
+	if err := os.WriteFile(path, []byte("fake-png-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v1/notes/note-1/images" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile: %v", err)
+		}
+		defer file.Close()
+		data, _ := io.ReadAll(file)
+		if string(data) != "fake-png-bytes" {
+			t.Errorf("uploaded content = %q", data)
+		}
+		if header.Filename != "photo.png" {
+			t.Errorf("filename = %q", header.Filename)
+		}
+		json.NewEncoder(w).Encode(map[string]string{"id": "img-1", "url": "/api/v1/images/img-1"})
+	}))
+	defer srv.Close()
+
+	img, err := newClient(srv.URL).uploadImage("note-1", path)
+	if err != nil {
+		t.Fatalf("uploadImage: %v", err)
+	}
+	if img.ID != "img-1" || img.URL != "/api/v1/images/img-1" {
+		t.Fatalf("unexpected result: %+v", img)
+	}
+}
+
+func TestUploadImageReturnsAPIErrorOnMissingNote(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "photo.png")
+	if err := os.WriteFile(path, []byte("bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"detail":"note not found"}`))
+	}))
+	defer srv.Close()
+
+	if _, err := newClient(srv.URL).uploadImage("missing", path); err == nil {
+		t.Fatal("expected an error for a 404 response")
 	}
 }
 

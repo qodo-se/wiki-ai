@@ -293,13 +293,37 @@ async function renderNote(noteId) {
     `;
 
     const pathInput = document.getElementById('path-input');
+    // Saving while an image upload is still in flight would persist markdown
+    // that doesn't yet reference the image, even though the editor looks
+    // up to date once the upload's callback inserts it — so Save is disabled
+    // for the duration of any pending upload.
+    let pendingUploads = 0;
     const editor = new toastui.Editor({
         el: document.querySelector('#editor-container'),
         height: '650px',
         initialEditType: 'markdown',
         previewStyle: window.matchMedia('(min-width: 768px)').matches ? 'vertical' : 'tab',
         initialValue: initialContent,
-        usageStatistics: false
+        usageStatistics: false,
+        hooks: {
+            addImageBlobHook: async (blob, callback) => {
+                pendingUploads++;
+                saveBtn.disabled = true;
+                try {
+                    const formData = new FormData();
+                    formData.append('file', blob, blob.name || 'image');
+                    const res = await fetch(apiUrl + '/images', { method: 'POST', body: formData });
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    const { url } = await res.json();
+                    callback(url, blob.name || '');
+                } catch (err) {
+                    alert('Image upload failed: ' + err.message);
+                } finally {
+                    pendingUploads--;
+                    if (pendingUploads === 0) saveBtn.disabled = false;
+                }
+            }
+        }
     });
 
     fetch(apiUrl + '/meta')

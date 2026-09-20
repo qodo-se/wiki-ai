@@ -37,6 +37,8 @@ func main() {
 		runSemanticSearch(args)
 	case "backup":
 		runBackup(args)
+	case "upload-image":
+		runUploadImage(args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -66,6 +68,10 @@ Commands:
   backup [output-path]
                        trigger a server-side backup and download it (default
                        output filename comes from the server)
+  upload-image --note <uuid> <path>
+                       upload a local file as an image attached to a note,
+                       printing the image URL to insert into the note's
+                       markdown as ![alt](url)
 
 list flags:
   --limit int    max number of notes to return per page (default 10)
@@ -297,6 +303,25 @@ func runBackup(args []string) {
 		fail(err)
 	}
 	fmt.Println(saved)
+}
+
+func runUploadImage(args []string) {
+	fs := flag.NewFlagSet("upload-image", flag.ExitOnError)
+	note := fs.String("note", "", "uuid of the note to attach the image to (required)")
+	urlFlag := addURLFlag(fs)
+	fs.Parse(args)
+	url := *urlFlag
+
+	if *note == "" || fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli upload-image --note <uuid> <path>")
+		os.Exit(1)
+	}
+
+	img, err := newClient(url).uploadImage(requireUUID(*note), fs.Arg(0))
+	if err != nil {
+		fail(err)
+	}
+	fmt.Println(sanitizeForTerminal(img.URL))
 }
 
 func runSemanticSearch(args []string) {

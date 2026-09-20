@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 import uuid as uuidlib
 
@@ -9,6 +10,7 @@ from categorize import ReorganizeInProgress, reorganize_notes
 from db import connect
 from embeddings import EmbeddingError, embed_text
 from paths import normalize_path
+from routes.images import delete_note_images
 from vectorstore import VectorStoreError, delete_vector, upsert_vector
 
 router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
@@ -29,6 +31,17 @@ def _delete_embedding(note_id: str) -> None:
         delete_vector(note_id)
     except VectorStoreError as e:
         print(f"warning: failed to delete vector for note {note_id}: {e}", file=sys.stderr)
+
+
+def _delete_images(note_id: str) -> None:
+    # Best-effort, like _delete_embedding above — the note itself is already
+    # gone by the time this runs, so a failure here (disk I/O, or a locked
+    # second connection to the DB) must not turn into a 500 for a delete that
+    # already succeeded.
+    try:
+        delete_note_images(note_id)
+    except (OSError, sqlite3.Error) as e:
+        print(f"warning: failed to delete images for note {note_id}: {e}", file=sys.stderr)
 
 PATH_PATTERN = r"^[A-Za-z0-9 _./-]*$"
 
@@ -139,6 +152,7 @@ def delete_note(uuid: str):
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="note not found")
     _delete_embedding(uuid)
+    _delete_images(uuid)
 
 
 @router.post("/reorganize")

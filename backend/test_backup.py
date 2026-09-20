@@ -1,5 +1,7 @@
+import io
 import sqlite3
 import tempfile
+import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,8 +21,10 @@ def client():
 
 
 def _notes_in(download_response) -> set[str]:
+    with zipfile.ZipFile(io.BytesIO(download_response.content)) as zf:
+        db_bytes = zf.read("wiki.db")
     with tempfile.NamedTemporaryFile(suffix=".db") as f:
-        f.write(download_response.content)
+        f.write(db_bytes)
         f.flush()
         conn = sqlite3.connect(f.name)
         return {row[0] for row in conn.execute("SELECT content FROM notes")}
@@ -35,7 +39,7 @@ def test_create_backup_returns_filename_and_size(client):
     res = client.post("/api/v1/backup")
     assert res.status_code == 200
     body = res.json()
-    assert body["filename"] == "manual-backup.db"
+    assert body["filename"] == "manual-backup.zip"
     assert body["size"] > 0
 
 
@@ -57,8 +61,22 @@ def test_second_create_overwrites_the_same_file(client):
     client.post("/api/v1/notes", json={"content": "second"})
     second = client.post("/api/v1/backup")
 
-    assert first.json()["filename"] == second.json()["filename"] == "manual-backup.db"
+    assert first.json()["filename"] == second.json()["filename"] == "manual-backup.zip"
     assert _notes_in(client.get("/api/v1/backup")) == {"first", "second"}
+
+
+def test_backup_zip_includes_note_images(client):
+    note_id = client.post("/api/v1/notes", json={"content": "has an image"}).json()["id"]
+    image_id = client.post(
+        f"/api/v1/notes/{note_id}/images",
+        files={"file": ("photo.png", b"fake-png-bytes", "image/png")},
+    ).json()["id"]
+
+    assert client.post("/api/v1/backup").status_code == 200
+    download_res = client.get("/api/v1/backup")
+
+    with zipfile.ZipFile(io.BytesIO(download_res.content)) as zf:
+        assert zf.read(f"images/{image_id}.png") == b"fake-png-bytes"
 
 
 def test_create_returns_409_while_a_backup_is_already_in_progress(client):

@@ -6,13 +6,20 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// quoteEscaper matches the unexported one mime/multipart uses internally for
+// CreateFormFile's filename param — needed here since a custom Content-Type
+// requires CreatePart instead, which doesn't escape the header for you.
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
 
 type client struct {
 	baseURL string
@@ -191,6 +198,77 @@ func (c *client) deleteNote(id string) error {
 	return err
 }
 
+type uploadedImage struct {
+	ID  string `json:"id"`
+	URL string `json:"url"`
+}
+
+// uploadImage attaches a local file to a note. Bypasses do() (which always
+// sends a JSON body) since a multipart upload needs its own Content-Type
+// header with a boundary, and streams the file rather than buffering it as
+// JSON. Uses backupHTTP (no timeout), same reasoning as backups: this app
+// puts no cap on file size, so a fixed short deadline could abort a
+// legitimately large upload.
+func (c *client) uploadImage(noteID, path string) (*uploadedImage, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	// CreateFormFile always labels the part application/octet-stream, which
+	// the server stores verbatim and serves back as the file's Content-Type —
+	// making an uploaded image fail to render when later linked in a note. A
+	// guessed type from the extension is still just a label for serving it
+	// back (never validated against the actual bytes), so this doesn't
+	// conflict with accepting any file unconditionally.
+	contentType := mime.TypeByExtension(filepath.Ext(path))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, quoteEscaper.Replace(filepath.Base(path))))
+	header.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(part, f); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/api/v1/notes/"+noteID+"/images", &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.backupHTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &apiError{status: resp.StatusCode, body: string(respBody)}
+	}
+
+	var img uploadedImage
+	if err := json.Unmarshal(respBody, &img); err != nil {
+		return nil, err
+	}
+	return &img, nil
+}
+
 func (c *client) search(query string, limit int) ([]searchHit, error) {
 	body, err := c.do(http.MethodGet, "/api/v1/search", url.Values{
 		"q":     {query},
@@ -254,12 +332,12 @@ func (c *client) downloadBackup(destPath string) (string, error) {
 		// man-in-the-middle) might smuggle into Content-Disposition's filename
 		// (e.g. "../../etc/passwd" or an absolute path) — never trust a
 		// server-supplied filename as a raw local path. The server always
-		// names it "manual-backup.db" today, so running this twice from the
+		// names it "manual-backup.zip" today, so running this twice from the
 		// same directory is expected to overwrite, same as the server's own
 		// single-file, no-history design.
 		destPath = filepath.Base(filenameFromContentDisposition(resp.Header.Get("Content-Disposition")))
 		if destPath == "" || destPath == "." || destPath == string(filepath.Separator) {
-			destPath = "wiki-backup.db"
+			destPath = "wiki-backup.zip"
 		}
 	}
 

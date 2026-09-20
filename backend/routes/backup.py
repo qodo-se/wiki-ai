@@ -23,7 +23,7 @@ def download_backup():
         raise HTTPException(status_code=404, detail="no backup has been created yet")
     return FileResponse(
         path,
-        media_type="application/octet-stream",
+        media_type="application/zip",
         filename=os.path.basename(path),
         # A backup is mutable/regenerable — overwritten by the next POST — so
         # never let a client or intermediary cache it.

@@ -71,6 +71,10 @@ def test_no_backup_on_fresh_install(monkeypatch):
 
 
 def test_backup_retention_keeps_only_last_n(monkeypatch):
+    # Starts from an explicit empty history rather than the real MIGRATIONS,
+    # so this test's own version numbering doesn't drift out of sync with
+    # however many migrations the app actually ships.
+    monkeypatch.setattr(db, "MIGRATIONS", [])
     db.connect()
     for version in range(1, db.BACKUP_RETENTION + 3):
         # MIGRATIONS is always the full cumulative history in production (a new
