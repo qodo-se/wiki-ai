@@ -3,6 +3,7 @@ import glob
 import os
 import sqlite3
 import threading
+import zipfile
 
 DB_PATH = "/data/wiki.db"
 BACKUP_RETENTION = 5
@@ -78,6 +79,21 @@ MIGRATIONS: list[tuple[int, list]] = [
     # existed (e.g. "/recipe/" or "/recipe " next to "/recipe") group correctly on
     # the by-path home view instead of appearing as separate paths.
     (1, [_normalize_existing_note_paths]),
+    # Metadata for images attached to a note. The bytes themselves live on disk
+    # under images_dir(), keyed by id — never in this table.
+    (2, [
+        """
+        CREATE TABLE images (
+            id         TEXT PRIMARY KEY,
+            note_id    TEXT NOT NULL,
+            filename   TEXT NOT NULL,
+            mime_type  TEXT NOT NULL,
+            size       INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """,
+        "CREATE INDEX idx_images_note_id ON images (note_id);",
+    ]),
 ]
 
 
@@ -98,6 +114,13 @@ def _validate_migrations() -> None:
 
 def _backup_dir() -> str:
     return os.path.join(os.path.dirname(DB_PATH) or ".", "backups")
+
+
+def images_dir() -> str:
+    # A function (not a module-level constant) for the same reason as
+    # _backup_dir(): it must reflect DB_PATH as monkeypatched by tests, not
+    # whatever DB_PATH was at import time.
+    return os.path.join(os.path.dirname(DB_PATH) or ".", "images")
 
 
 def _current_version(conn: sqlite3.Connection) -> int:
@@ -131,7 +154,11 @@ def _prune_old_backups() -> None:
 # those exist to protect a schema upgrade specifically, this exists so a
 # person can click one button and get one file. Keeping them independent
 # means neither has to reason about the other's locking or retention.
-MANUAL_BACKUP_FILENAME = "manual-backup.db"
+#
+# It's a zip (a DB snapshot plus every note image) rather than a bare .db file
+# so a single download is a complete backup now that image bytes live outside
+# the database.
+MANUAL_BACKUP_FILENAME = "manual-backup.zip"
 _manual_backup_lock = threading.Lock()
 
 
@@ -140,9 +167,10 @@ def manual_backup_path() -> str:
 
 
 def try_create_manual_backup() -> bool:
-    """Overwrites the single manual backup file with a fresh snapshot. Returns
-    False immediately, without blocking, if a backup is already in progress —
-    callers should treat that as "try again shortly", not queue behind it."""
+    """Overwrites the single manual backup zip (DB snapshot + images) with a
+    fresh one. Returns False immediately, without blocking, if a backup is
+    already in progress — callers should treat that as "try again shortly",
+    not queue behind it."""
     if not _manual_backup_lock.acquire(blocking=False):
         return False
     try:
@@ -151,19 +179,28 @@ def try_create_manual_backup() -> bool:
         # Staging file + rename so a backup that fails partway through can't
         # leave a truncated file where a good one previously was.
         staging_path = dest_path + ".tmp"
+        staging_db_path = dest_path + ".db.tmp"
         source = sqlite3.connect(DB_PATH, timeout=CONNECT_TIMEOUT_SECONDS)
         try:
-            dest = sqlite3.connect(staging_path, timeout=CONNECT_TIMEOUT_SECONDS)
+            dest = sqlite3.connect(staging_db_path, timeout=CONNECT_TIMEOUT_SECONDS)
             try:
                 source.backup(dest)  # safe under WAL, unlike a raw file copy
             finally:
                 dest.close()
+            with zipfile.ZipFile(staging_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(staging_db_path, "wiki.db")
+                images_path = images_dir()
+                if os.path.isdir(images_path):
+                    for name in os.listdir(images_path):
+                        zf.write(os.path.join(images_path, name), os.path.join("images", name))
         except Exception:
             if os.path.exists(staging_path):
                 os.remove(staging_path)
             raise
         finally:
             source.close()
+            if os.path.exists(staging_db_path):
+                os.remove(staging_db_path)
         os.rename(staging_path, dest_path)
         return True
     finally:

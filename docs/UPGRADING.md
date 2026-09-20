@@ -3,8 +3,9 @@
 This app stores your data in two places, both persisted in Docker named volumes so
 they survive `docker compose pull && docker compose up -d`:
 
-- **`wiki-data`** — a SQLite database (`/data/wiki.db`) holding every note and setting.
-  This is the data that matters; back it up before any upgrade you're unsure about.
+- **`wiki-data`** — a SQLite database (`/data/wiki.db`) holding every note and setting,
+  plus an `/data/images` directory holding the bytes of every image uploaded into a
+  note. This is the data that matters; back it up before any upgrade you're unsure about.
 - **`qdrant-data`** — the semantic search vector index. It's derived data: if it's ever
   lost or out of date, `POST /api/v1/search/reindex` rebuilds it from SQLite. It does
   not need to be backed up.
@@ -64,29 +65,57 @@ docker cp $(docker compose ps -q api):/data/backups/manual-<timestamp>.db ./wiki
 (the timestamp includes time-of-day, not just the date, so running this twice in one
 day can't silently overwrite an earlier snapshot)
 
+This snippet only backs up the database — it does not include `/data/images`. For a
+single backup that covers both, use the app's built-in on-demand backup instead
+(**Settings → Backup**, or `wiki-cli backup`), which downloads a zip containing both
+`wiki.db` and `images/`.
+
 ## Restoring a backup
 
-1. If you're restoring a copy saved to the host (via `docker cp`, above) rather than
-   one already under `/data/backups/` in the `wiki-data` volume, copy it back in
-   **first, before stopping the app** — `docker compose cp` targets the running `api`
-   container, which the next step removes. Copy it to `/data/` directly rather than
+If you're restoring the **built-in on-demand backup** (Settings → Backup, or `wiki-cli
+backup`), it downloads as a **zip** containing `wiki.db` plus an `images/` directory —
+extract it on the host first, before anything below:
+```sh
+unzip wiki-backup.zip -d wiki-backup-extracted
+```
+Wherever the steps below say "the backup file", use `wiki-backup-extracted/wiki.db` —
+**never copy the zip itself over `/data/wiki.db`**, or you'll overwrite the live
+database with zip bytes instead of the SQLite data inside it. A pre-migration snapshot
+under `/data/backups/wiki-v*.db`, or the manual `sqlite3` snippet's output further up,
+is already a raw database file — skip the unzip step for those.
+
+1. If you're restoring a copy saved to the host (via `docker cp`, above, or the
+   extracted `wiki.db` from a downloaded backup zip) rather than one already under
+   `/data/backups/` in the `wiki-data` volume, copy it back in **first, before
+   stopping the app** — `docker compose cp` targets the running `api` container,
+   which the next step removes. Copy it to `/data/` directly rather than
    `/data/backups/`, since that subdirectory only gets created the first time a
-   migration actually runs and may not exist yet on a fresh or replacement volume:
+   migration actually runs and may not exist yet on a fresh or replacement volume.
+   If you also extracted an `images/` directory from a backup zip, copy that in now
+   too, for the same reason — everything that needs the still-running container has
+   to happen before the next step:
    ```sh
-   docker compose cp ./wiki-backup.db api:/data/restore-source.db
+   docker compose cp ./wiki-backup-extracted/wiki.db api:/data/restore-source.db
+   docker compose cp ./wiki-backup-extracted/images api:/data/restore-images-source
    ```
+   (drop the second line if you're restoring a database-only backup with no images)
 2. Stop the app: `docker compose down`.
-3. Copy the backup file over `/data/wiki.db`, and remove any leftover WAL sidecar
-   files from the database being replaced (they reference the old file and aren't
-   valid against the restored one — SQLite recreates them fresh). Point `cp` at
-   `/data/restore-source.db` if you just copied it in above, or at its path under
-   `/data/backups/` if it was already in the volume:
+3. Move the restored files into place. Copy the database file over `/data/wiki.db`
+   and remove any leftover WAL sidecar files (they reference the old file and aren't
+   valid against the restored one — SQLite recreates them fresh); point `cp` at
+   `/data/restore-source.db` if you copied it in above, or at its path under
+   `/data/backups/` if it was already in the volume. If you copied an images
+   directory in above, replace `/data/images` with it too — this all has to run as
+   one `docker compose run` (a one-off container over the stopped volume), since
+   `docker compose cp` only works against an already-running container:
    ```sh
    docker compose run --rm --entrypoint sh api \
-     -c "cp /data/restore-source.db /data/wiki.db && rm -f /data/wiki.db-wal /data/wiki.db-shm"
+     -c "cp /data/restore-source.db /data/wiki.db && rm -f /data/wiki.db-wal /data/wiki.db-shm && rm -rf /data/images && mv /data/restore-images-source /data/images"
    ```
-   (the `api` service already mounts the `wiki-data` volume at `/data`, so no extra
-   `-v` is needed)
+   (drop the `rm -rf /data/images && mv /data/restore-images-source /data/images`
+   part of that command if you're restoring a database-only backup with no images —
+   the `api` service already mounts the `wiki-data` volume at `/data`, so no extra
+   `-v` is needed either way)
 4. Start the app back up: `docker compose up -d`.
 5. If semantic search results look stale afterward (the restored SQLite data no
    longer matches what's embedded in Qdrant), rebuild the index from the settings

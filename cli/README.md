@@ -53,9 +53,14 @@ echo "hello wiki" | ./wiki-cli create
 ./wiki-cli search --limit 20 "setup"
 
 # trigger a server-side backup and download it — saves under the server's
-# suggested filename by default, or pass your own output path
+# suggested filename by default, or pass your own output path. Downloads as a
+# zip containing the database snapshot plus every note's uploaded images.
 ./wiki-cli backup
-./wiki-cli backup ./my-backup.db
+./wiki-cli backup ./my-backup.zip
+
+# upload a local file as an image attached to a note, printing the image URL
+# to insert into the note's markdown as ![alt](url)
+./wiki-cli upload-image --note <uuid> ./photo.jpg
 
 # point at a different server
 ./wiki-cli list --url http://wiki.example.com
