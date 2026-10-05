@@ -25,6 +25,23 @@ If the database's schema version is *newer* than what the running code understan
 (e.g. you rolled back to an older image after a newer one already migrated the data),
 the app refuses to start rather than risk operating on a shape it doesn't recognize.
 
+## Semantic search index format changes
+
+Unlike the SQLite schema, the Qdrant vector index has no automatic migration — nothing
+on startup checks whether the vectors already in Qdrant match the shape the running
+code expects. A release that changes *how* notes are embedded (switching the
+embedding model, or changing what gets embedded — e.g. one note per vector vs. one
+vector per paragraph chunk) doesn't error on old data, but old notes' existing
+vectors simply won't match what the new code looks for, so those notes silently stop
+contributing to semantic/hybrid search results until you reindex. New notes created
+or edited after the upgrade are unaffected either way, since they're always embedded
+fresh in the new format.
+
+If a release's notes call out a change to the embedding/indexing format, run a
+reindex once afterward — same command as recovering from stale vectors after a
+restore (**Settings → Reindex search**, or `POST /api/v1/search/reindex`) — to bring
+every existing note's vectors up to the new format.
+
 ## Version policy
 
 Releases follow semver (`MAJOR.MINOR.PATCH`, tracked in `backend/VERSION`). The

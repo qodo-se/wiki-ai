@@ -20,8 +20,8 @@ def test_reindex_deletes_collection_then_reembeds_every_note(monkeypatch):
     monkeypatch.setattr(reindex, "embed_text", lambda content: [0.1])
     monkeypatch.setattr(
         reindex,
-        "upsert_vector",
-        lambda point_id, vector, payload=None: calls.append(("upsert", payload["note_id"])),
+        "upsert_vectors",
+        lambda points: calls.append(("upsert", points[0][2]["note_id"])),
     )
 
     result = reindex.reindex_notes()
@@ -34,23 +34,23 @@ def test_reindex_deletes_collection_then_reembeds_every_note(monkeypatch):
 
 def test_reindex_chunks_each_note_into_multiple_points(monkeypatch):
     # "hello\n\nworld" is two paragraphs -> two chunks, so one note should
-    # produce two upserted points, each tagged with the same note_id.
+    # produce two upserted points (batched into one upsert_vectors call),
+    # each tagged with the same note_id and its own chunk_index.
     _insert_note("n1", "hello\n\nworld")
 
     monkeypatch.setattr(reindex, "delete_collection", lambda: None)
     monkeypatch.setattr(reindex, "embed_text", lambda content: [0.1])
-    upserted = []
-    monkeypatch.setattr(
-        reindex,
-        "upsert_vector",
-        lambda point_id, vector, payload=None: upserted.append((point_id, payload["note_id"])),
-    )
+    calls = []
+    monkeypatch.setattr(reindex, "upsert_vectors", lambda points: calls.append(points))
 
     result = reindex.reindex_notes()
 
-    assert len(upserted) == 2
-    assert {p[1] for p in upserted} == {"n1"}
-    assert len({p[0] for p in upserted}) == 2  # distinct point ids per chunk
+    assert len(calls) == 1  # one batched call, not one per chunk
+    points = calls[0]
+    assert len(points) == 2
+    assert {p[2]["note_id"] for p in points} == {"n1"}
+    assert {p[2]["chunk_index"] for p in points} == {0, 1}
+    assert len({p[0] for p in points}) == 2  # distinct point ids per chunk
     assert result == {"total": 1, "embedded": 1, "failed": 0}
 
 
@@ -66,7 +66,7 @@ def test_reindex_counts_per_note_failures_without_aborting(monkeypatch):
         return [0.1]
 
     monkeypatch.setattr(reindex, "embed_text", fake_embed)
-    monkeypatch.setattr(reindex, "upsert_vector", lambda point_id, vector, payload=None: None)
+    monkeypatch.setattr(reindex, "upsert_vectors", lambda points: None)
 
     result = reindex.reindex_notes()
 

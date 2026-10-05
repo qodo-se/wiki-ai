@@ -64,15 +64,29 @@ def _ensure_collection(vector_size: int) -> None:
 
 
 def upsert_vector(point_id: str, vector: list[float], payload: dict | None = None) -> None:
-    _ensure_collection(len(vector))
+    upsert_vectors([(point_id, vector, payload)])
+
+
+def upsert_vectors(points: list[tuple[str, list[float], dict | None]]) -> None:
+    # One Qdrant round-trip for N points instead of N separate ones (each of
+    # which also re-checked collection existence) — a note's chunks, or every
+    # note during a reindex, upsert together rather than one point at a time.
+    if not points:
+        return
+    _ensure_collection(len(points[0][1]))
     _, collection = _cfg()
     status, resp = _request(
         "PUT",
         f"/collections/{collection}/points",
-        {"points": [{"id": point_id, "vector": vector, "payload": payload or {}}]},
+        {
+            "points": [
+                {"id": point_id, "vector": vector, "payload": payload or {}}
+                for point_id, vector, payload in points
+            ]
+        },
     )
     if status not in (200, 201):
-        raise VectorStoreError(f"could not upsert vector: {resp}")
+        raise VectorStoreError(f"could not upsert vectors: {resp}")
 
 
 def delete_collection() -> None:
@@ -94,6 +108,30 @@ def delete_vectors_for_note(note_id: str) -> None:
     )
     if status not in (200, 201, 404):  # 404: collection doesn't exist yet — nothing to delete
         raise VectorStoreError(f"could not delete vectors for note: {resp}")
+
+
+def delete_stale_chunks(note_id: str, keep_count: int) -> None:
+    # Called after a note's first `keep_count` chunks (indices 0..keep_count-1)
+    # have already been upserted in place at their deterministic point ids —
+    # this only removes leftover chunk-points at index >= keep_count from a
+    # note that shrank to fewer chunks than its previous version. Doing this
+    # as a separate, final step (not a delete-everything-first) means a
+    # failure upserting a new chunk never destroys a still-valid old one.
+    _, collection = _cfg()
+    status, resp = _request(
+        "POST",
+        f"/collections/{collection}/points/delete",
+        {
+            "filter": {
+                "must": [
+                    {"key": "note_id", "match": {"value": note_id}},
+                    {"key": "chunk_index", "range": {"gte": keep_count}},
+                ]
+            }
+        },
+    )
+    if status not in (200, 201, 404):  # 404: collection doesn't exist yet — nothing to delete
+        raise VectorStoreError(f"could not delete stale chunks for note: {resp}")
 
 
 def search_vectors(vector: list[float], limit: int) -> list[dict]:

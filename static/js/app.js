@@ -427,7 +427,19 @@ async function renderSearch() {
         try {
             const res = await fetch(ENDPOINTS[mode] + '?q=' + encodeURIComponent(q) + '&limit=10');
             if (reqId !== currentReqId) return; // stale
-            if (!res.ok) throw new Error('HTTP ' + res.status);
+            if (!res.ok) {
+                // Hybrid search fails hard (no silent fallback to keyword-only)
+                // when Ollama/Qdrant is down, so surface the server's actual
+                // reason plus a concrete next step instead of a bare status code.
+                let detail = null;
+                try {
+                    detail = (await res.json()).detail;
+                } catch {
+                    // response body wasn't JSON — fall back to the status below
+                }
+                const hint = mode === 'hybrid' ? ' Try Keyword search instead.' : '';
+                throw new Error((detail || `HTTP ${res.status}`) + hint);
+            }
             const hits = await res.json();
             if (reqId !== currentReqId) return; // stale
             if (!hits.length) {
