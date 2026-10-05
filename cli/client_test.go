@@ -506,16 +506,19 @@ func TestSearchRequest(t *testing.T) {
 		if got := r.URL.Query().Get("limit"); got != "7" {
 			t.Errorf("limit = %q", got)
 		}
-		json.NewEncoder(w).Encode([]searchHit{{ID: "x"}})
+		if got := r.URL.Query().Get("offset"); got != "3" {
+			t.Errorf("offset = %q", got)
+		}
+		json.NewEncoder(w).Encode(searchResponse{Items: []searchHit{{ID: "x"}}, Total: 9, Limit: 7, Offset: 3})
 	}))
 	defer srv.Close()
 
-	hits, err := newClient(srv.URL).search("hello world", 7)
+	resp, err := newClient(srv.URL).search("hello world", 7, 3)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
-	if len(hits) != 1 || hits[0].ID != "x" {
-		t.Fatalf("unexpected hits: %+v", hits)
+	if len(resp.Items) != 1 || resp.Items[0].ID != "x" || resp.Total != 9 || resp.Offset != 3 {
+		t.Fatalf("unexpected response: %+v", resp)
 	}
 }
 
@@ -553,16 +556,19 @@ func TestHybridSearchRequest(t *testing.T) {
 		if got := r.URL.Query().Get("limit"); got != "7" {
 			t.Errorf("limit = %q", got)
 		}
-		json.NewEncoder(w).Encode([]searchHit{{ID: "x", Score: 0.0164}})
+		if got := r.URL.Query().Get("offset"); got != "3" {
+			t.Errorf("offset = %q", got)
+		}
+		json.NewEncoder(w).Encode(searchResponse{Items: []searchHit{{ID: "x", Score: 0.0164}}, Total: 9, Limit: 7, Offset: 3})
 	}))
 	defer srv.Close()
 
-	hits, err := newClient(srv.URL).hybridSearch("hello world", 7)
+	resp, err := newClient(srv.URL).hybridSearch("hello world", 7, 3)
 	if err != nil {
 		t.Fatalf("hybridSearch: %v", err)
 	}
-	if len(hits) != 1 || hits[0].ID != "x" || hits[0].Score != 0.0164 {
-		t.Fatalf("unexpected hits: %+v", hits)
+	if len(resp.Items) != 1 || resp.Items[0].ID != "x" || resp.Items[0].Score != 0.0164 || resp.Total != 9 {
+		t.Fatalf("unexpected response: %+v", resp)
 	}
 }
 

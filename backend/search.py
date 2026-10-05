@@ -55,7 +55,11 @@ def _build_snippet(content: str, query: str, context: int = 80) -> str:
     return snippet
 
 
-def search_notes(query: str, limit: int) -> list[SearchHit]:
+def keyword_matches(query: str) -> list[SearchHit]:
+    # Every matching note, ranked, with no pagination applied — used both by
+    # the /api/v1/search route (which also needs a total count) and by
+    # hybrid_search_notes (which wants the full candidate list to fuse), so
+    # the word-boundary matching logic lives in exactly one place.
     q = query.strip()
     if not q:
         return []
@@ -80,7 +84,7 @@ def search_notes(query: str, limit: int) -> list[SearchHit]:
     hits = []
     for row in rows:
         content = row[3]
-        count = len(word_match.findall(content))
+        count = sum(1 for _ in word_match.finditer(content))  # count only — finditer avoids materializing every match
         if count == 0:
             continue  # substring matched, but not as a whole word
         hits.append(
@@ -93,8 +97,13 @@ def search_notes(query: str, limit: int) -> list[SearchHit]:
                 created_at=row[4],
             )
         )
-    hits.sort(key=lambda h: h.score, reverse=True)
-    return hits[:limit]
+    # id as a tiebreaker (unique per note) gives pagination a fully
+    # deterministic order — ties on score alone could otherwise fall back to
+    # SQLite's unspecified order for ties in "ORDER BY created_at", which
+    # isn't guaranteed stable across requests and could shift a note across
+    # a page boundary between one page load and the next.
+    hits.sort(key=lambda h: (-h.score, h.id))
+    return hits
 
 
 # A note now embeds as several chunk-points (see chunking.py) rather than
@@ -175,19 +184,18 @@ class HybridSearchHit(BaseModel):
 # doesn't automatically outrank one ranked respectably in both.
 _RRF_K = 60
 
-# Each underlying search is asked for at least this many candidates, scaled
-# up with the caller's requested `limit` so fusion always has more to work
-# with than what's actually being asked for (otherwise a `limit` close to or
-# above this floor could get fewer distinct notes back than requested, even
-# when more genuinely matching notes exist).
-_RRF_CANDIDATE_POOL_FLOOR = 50
-_RRF_CANDIDATE_OVERSAMPLE_FACTOR = 3
+# Caps how many notes' worth of candidates hybrid search ever fetches for
+# fusion, regardless of how many notes actually exist — protects a
+# surprisingly large wiki from one search request ranking everything.
+_MAX_HYBRID_CANDIDATE_NOTES = 1000
 
 
-def _fuse_rrf(ranked_lists: list[list], limit: int) -> list[HybridSearchHit]:
-    # Fusing by rank position (not raw score — a keyword occurrence count and
-    # a cosine similarity aren't comparable numbers) means a note either
-    # input ranking was confident about still surfaces.
+def _fuse_rrf(ranked_lists: list[list]) -> list[HybridSearchHit]:
+    # Every note found in any input list, fused by rank position (not raw
+    # score — a keyword occurrence count and a cosine similarity aren't
+    # comparable numbers) and sorted best-first. Unsliced — callers decide
+    # how much of this to return, since the full length is also the total
+    # for pagination.
     rrf_scores: dict[str, float] = {}
     hit_by_id: dict[str, SearchHit | SemanticSearchHit] = {}
     for hits in ranked_lists:
@@ -195,7 +203,11 @@ def _fuse_rrf(ranked_lists: list[list], limit: int) -> list[HybridSearchHit]:
             rrf_scores[hit.id] = rrf_scores.get(hit.id, 0.0) + 1.0 / (_RRF_K + rank + 1)
             hit_by_id.setdefault(hit.id, hit)
 
-    ranked_ids = sorted(rrf_scores, key=lambda note_id: rrf_scores[note_id], reverse=True)[:limit]
+    # note_id as a tiebreaker gives a fully deterministic total order — the
+    # same reason keyword_matches() sorts on (score, id), not score alone:
+    # without it, a tie between two notes' fused scores could shift between
+    # page requests and skip or duplicate a note across a page boundary.
+    ranked_ids = sorted(rrf_scores, key=lambda note_id: (-rrf_scores[note_id], note_id))
     return [
         HybridSearchHit(
             id=hit_by_id[note_id].id,
@@ -209,16 +221,29 @@ def _fuse_rrf(ranked_lists: list[list], limit: int) -> list[HybridSearchHit]:
     ]
 
 
-def hybrid_search_notes(query: str, limit: int) -> list[HybridSearchHit]:
+def hybrid_search_notes(query: str, limit: int, offset: int = 0) -> tuple[list[HybridSearchHit], int]:
     # Keyword and semantic search alone each have a blind spot: a keyword
     # match misses a relevant note that doesn't use the query's exact words,
     # while a semantic match can bury a note that literally contains the
     # query term (whole-note embeddings don't privilege exact term overlap).
+    #
+    # Returns (page, total) rather than just a list: computing "total" by
+    # re-running the fusion would mean embedding the query a second time,
+    # which hits Ollama again for no reason — one fusion pass yields both.
     q = query.strip()
     if not q:
-        return []
+        return [], 0
 
-    candidate_pool = max(limit * _RRF_CANDIDATE_OVERSAMPLE_FACTOR, _RRF_CANDIDATE_POOL_FLOOR)
-    keyword_hits = search_notes(q, candidate_pool)
+    # Fetches a ranking over every note (capped, see above) rather than an
+    # oversample scaled by the requested page, so "total" is exact and stable
+    # across pages — if the candidate pool instead grew with limit/offset,
+    # "total" would appear to shift as the user paged deeper. Cheap at this
+    # app's realistic (personal-wiki-scale) data.
+    with connect() as db:
+        total_notes = db.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+    candidate_pool = min(total_notes, _MAX_HYBRID_CANDIDATE_NOTES)
+
+    keyword_hits = keyword_matches(q)
     semantic_hits = semantic_search_notes(q, candidate_pool)
-    return _fuse_rrf([keyword_hits, semantic_hits], limit)
+    fused = _fuse_rrf([keyword_hits, semantic_hits])
+    return fused[offset : offset + limit], len(fused)

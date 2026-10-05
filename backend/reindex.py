@@ -27,20 +27,29 @@ def reindex_notes() -> dict:
         # proceed to the delete+rebuild, since those notes wouldn't have been
         # searchable anyway. A note's chunks are embedded as a unit: one failing
         # chunk fails the whole note, same as "this note isn't fully searchable".
-        note_vectors, failed = [], 0
+        #
+        # A blank note has zero chunks, so it "succeeds" vacuously without ever
+        # calling embed_text — that must not count toward the abort check below,
+        # or one blank note in the wiki would mask every real note failing.
+        note_vectors, failed, attempted = [], 0, 0
         for note_id, content in rows:
+            chunks = chunk_content(content)
+            if not chunks:
+                note_vectors.append((note_id, []))
+                continue
+            attempted += 1
             try:
-                vectors = [embed_text(chunk) for chunk in chunk_content(content)]
+                vectors = [embed_text(chunk) for chunk in chunks]
             except EmbeddingError as e:
                 print(f"warning: failed to embed note {note_id}: {e}", file=sys.stderr)
                 failed += 1
                 continue
             note_vectors.append((note_id, vectors))
 
-        if rows and not note_vectors:
+        if attempted and failed == attempted:
             raise EmbeddingError(
-                f"failed to embed any of {len(rows)} note(s) — embedding service "
-                f"appears unreachable, leaving the existing index untouched"
+                f"failed to embed any of {attempted} note(s) with content — embedding "
+                f"service appears unreachable, leaving the existing index untouched"
             )
 
         # Wiped only now, and up front of the rebuild rather than upserted-over:

@@ -121,6 +121,13 @@ type noteListResponse struct {
 	Offset int           `json:"offset"`
 }
 
+type searchResponse struct {
+	Items  []searchHit `json:"items"`
+	Total  int         `json:"total"`
+	Limit  int         `json:"limit"`
+	Offset int         `json:"offset"`
+}
+
 func (c *client) listNotes(limit, offset int) (*noteListResponse, error) {
 	body, err := c.do(http.MethodGet, "/api/v1/notes", url.Values{
 		"limit":  {fmt.Sprint(limit)},
@@ -270,19 +277,20 @@ func (c *client) uploadImage(noteID, path string) (*uploadedImage, error) {
 	return &img, nil
 }
 
-func (c *client) search(query string, limit int) ([]searchHit, error) {
+func (c *client) search(query string, limit, offset int) (*searchResponse, error) {
 	body, err := c.do(http.MethodGet, "/api/v1/search", url.Values{
-		"q":     {query},
-		"limit": {fmt.Sprint(limit)},
+		"q":      {query},
+		"limit":  {fmt.Sprint(limit)},
+		"offset": {fmt.Sprint(offset)},
 	}, nil)
 	if err != nil {
 		return nil, err
 	}
-	var hits []searchHit
-	if err := json.Unmarshal(body, &hits); err != nil {
+	var resp searchResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err
 	}
-	return hits, nil
+	return &resp, nil
 }
 
 type backupMeta struct {
@@ -380,19 +388,20 @@ func filenameFromContentDisposition(header string) string {
 	return params["filename"]
 }
 
-func (c *client) hybridSearch(query string, limit int) ([]searchHit, error) {
+func (c *client) hybridSearch(query string, limit, offset int) (*searchResponse, error) {
 	body, err := c.do(http.MethodGet, "/api/v1/search/hybrid", url.Values{
-		"q":     {query},
-		"limit": {fmt.Sprint(limit)},
+		"q":      {query},
+		"limit":  {fmt.Sprint(limit)},
+		"offset": {fmt.Sprint(offset)},
 	}, nil)
 	if err != nil {
 		return nil, err
 	}
-	var hits []searchHit
-	if err := json.Unmarshal(body, &hits); err != nil {
+	var resp searchResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, err
 	}
-	return hits, nil
+	return &resp, nil
 }
 
 type appConfig struct {

@@ -92,6 +92,42 @@ def test_reindex_aborts_without_deleting_when_embedding_service_is_entirely_down
     assert not delete_called
 
 
+def test_reindex_aborts_even_when_a_blank_note_coexists_with_a_fully_down_service(monkeypatch):
+    # A blank note has zero chunks, so it "succeeds" without ever calling
+    # embed_text — that must not mask every real note failing and let the
+    # abort-on-total-failure check slip through.
+    _insert_note("blank", "")
+    _insert_note("n1", "hello")
+
+    delete_called = []
+    monkeypatch.setattr(reindex, "delete_collection", lambda: delete_called.append(True))
+
+    def fake_embed(content):
+        raise reindex.EmbeddingError("connection refused")
+
+    monkeypatch.setattr(reindex, "embed_text", fake_embed)
+
+    with pytest.raises(reindex.EmbeddingError):
+        reindex.reindex_notes()
+
+    assert not delete_called
+
+
+def test_reindex_proceeds_when_every_note_is_blank(monkeypatch):
+    # Nothing real to lose — an all-blank wiki shouldn't trip the abort check
+    # just because embed_text was never called.
+    _insert_note("blank1", "")
+    _insert_note("blank2", "   ")
+
+    monkeypatch.setattr(reindex, "delete_collection", lambda: None)
+    monkeypatch.setattr(reindex, "embed_text", lambda content: (_ for _ in ()).throw(AssertionError("should not be called")))
+    monkeypatch.setattr(reindex, "upsert_vectors", lambda points: None)
+
+    result = reindex.reindex_notes()
+
+    assert result == {"total": 2, "embedded": 2, "failed": 0}
+
+
 def test_reindex_rejects_concurrent_calls():
     reindex._reindex_lock.acquire()
     try:

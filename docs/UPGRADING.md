@@ -29,13 +29,21 @@ the app refuses to start rather than risk operating on a shape it doesn't recogn
 
 Unlike the SQLite schema, the Qdrant vector index has no automatic migration — nothing
 on startup checks whether the vectors already in Qdrant match the shape the running
-code expects. A release that changes *how* notes are embedded (switching the
-embedding model, or changing what gets embedded — e.g. one note per vector vs. one
-vector per paragraph chunk) doesn't error on old data, but old notes' existing
-vectors simply won't match what the new code looks for, so those notes silently stop
-contributing to semantic/hybrid search results until you reindex. New notes created
-or edited after the upgrade are unaffected either way, since they're always embedded
-fresh in the new format.
+code expects. What happens next depends on whether the change alters the vector
+*dimension*:
+
+- **Same dimension** (e.g. this app's whole-note-per-vector → one-vector-per-paragraph-
+  chunk change) — silent. Old notes' existing vectors simply won't match what the new
+  code looks for, so those notes stop contributing to semantic/hybrid search results,
+  but nothing errors. New notes created or edited after the upgrade are unaffected,
+  since they're always embedded fresh in the new format.
+- **Different dimension** (e.g. switching `ollama_embedding_model` to a model that
+  produces a different-sized vector) — loud. Qdrant rejects both searches and new
+  vector writes against the mismatched collection, so hybrid search starts returning
+  errors immediately, and new/edited notes save fine but silently get no vector
+  (logged as a server-side warning) until you reindex. Reindexing fixes this
+  immediately: it drops and recreates the collection from scratch, so it never hits
+  the mismatch itself.
 
 If a release's notes call out a change to the embedding/indexing format, run a
 reindex once afterward — same command as recovering from stale vectors after a
