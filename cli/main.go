@@ -33,8 +33,12 @@ func main() {
 		runDelete(args)
 	case "search":
 		runSearch(args)
-	case "search-semantic":
-		runSemanticSearch(args)
+	case "search-hybrid":
+		runHybridSearch(args)
+	case "config":
+		runConfig(args)
+	case "reindex":
+		runReindex(args)
 	case "backup":
 		runBackup(args)
 	case "upload-image":
@@ -61,10 +65,17 @@ Commands:
   create               create a note (content from --file or stdin)
   update <uuid>        update a note (content from --file or stdin)
   delete <uuid>        delete a note
-  search <query>       search notes (keyword match)
-  search-semantic <query>
-                       search notes by meaning, via embeddings (requires
-                       Ollama + Qdrant configured server-side)
+  search <query>       search notes (keyword, whole-word match)
+  search-hybrid <query>
+                       keyword + semantic search fused by reciprocal rank
+                       fusion — catches notes an exact keyword match would
+                       miss semantically, and vice versa; prints each hit's
+                       fused RRF score
+  config get           print the server's current Ollama/Qdrant settings
+  config set [flags]   update one or more settings (see "config set flags"
+                       below); only the flags you pass are changed
+  reindex              drop and re-embed every note's semantic search vector
+                       (e.g. after changing the embedding model)
   backup [output-path]
                        trigger a server-side backup and download it (default
                        output filename comes from the server)
@@ -76,6 +87,13 @@ Commands:
 list flags:
   --limit int    max number of notes to return per page (default 10)
   --offset int   number of notes to skip, for paging (default 0)
+
+config set flags:
+  --ollama-url string
+  --ollama-embedding-model string
+  --ollama-chat-model string
+  --qdrant-url string
+  --qdrant-collection string
 
 Global flags (accepted by every command):
   --url string   base URL of the wiki API (default "http://localhost:8081",
@@ -279,7 +297,7 @@ func runSearch(args []string) {
 		fail(err)
 	}
 	for _, h := range hits {
-		fmt.Printf("%s  %-30s %-20s %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), sanitizeForTerminal(h.Preview))
+		fmt.Printf("%s  %-30s %-20s matches:%-3d %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), int(h.Score), sanitizeForTerminal(h.Preview))
 	}
 }
 
@@ -324,23 +342,105 @@ func runUploadImage(args []string) {
 	fmt.Println(sanitizeForTerminal(img.URL))
 }
 
-func runSemanticSearch(args []string) {
-	fs := flag.NewFlagSet("search-semantic", flag.ExitOnError)
+func runHybridSearch(args []string) {
+	fs := flag.NewFlagSet("search-hybrid", flag.ExitOnError)
 	limit := fs.Int("limit", 10, "max number of results")
 	urlFlag := addURLFlag(fs)
 	fs.Parse(args)
 	url := *urlFlag
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: wiki-cli search-semantic <query>")
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli search-hybrid <query>")
 		os.Exit(1)
 	}
 
-	hits, err := newClient(url).semanticSearch(fs.Arg(0), *limit)
+	hits, err := newClient(url).hybridSearch(fs.Arg(0), *limit)
 	if err != nil {
 		fail(err)
 	}
 	for _, h := range hits {
-		fmt.Printf("%s  %-30s %-20s %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), sanitizeForTerminal(h.Preview))
+		fmt.Printf("%s  %-30s %-20s score:%.4f %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), h.Score, sanitizeForTerminal(h.Preview))
 	}
+}
+
+func runConfig(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli config <get|set> [flags]")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "get":
+		runConfigGet(args[1:])
+	case "set":
+		runConfigSet(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown config subcommand %q (want \"get\" or \"set\")\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func runConfigGet(args []string) {
+	fs := flag.NewFlagSet("config get", flag.ExitOnError)
+	urlFlag := addURLFlag(fs)
+	fs.Parse(args)
+
+	cfg, err := newClient(*urlFlag).getConfig()
+	if err != nil {
+		fail(err)
+	}
+	printConfig(cfg)
+}
+
+func runConfigSet(args []string) {
+	fs := flag.NewFlagSet("config set", flag.ExitOnError)
+	ollamaURL := fs.String("ollama-url", "", "")
+	embeddingModel := fs.String("ollama-embedding-model", "", "")
+	chatModel := fs.String("ollama-chat-model", "", "")
+	qdrantURL := fs.String("qdrant-url", "", "")
+	qdrantCollection := fs.String("qdrant-collection", "", "")
+	urlFlag := addURLFlag(fs)
+	fs.Parse(args)
+
+	updates := map[string]string{}
+	for field, val := range map[string]*string{
+		"ollama_url":             ollamaURL,
+		"ollama_embedding_model": embeddingModel,
+		"ollama_chat_model":      chatModel,
+		"qdrant_url":             qdrantURL,
+		"qdrant_collection":      qdrantCollection,
+	} {
+		if *val != "" {
+			updates[field] = *val
+		}
+	}
+	if len(updates) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli config set [--ollama-url U] [--ollama-embedding-model M] [--ollama-chat-model M] [--qdrant-url U] [--qdrant-collection C]")
+		os.Exit(1)
+	}
+
+	cfg, err := newClient(*urlFlag).setConfig(updates)
+	if err != nil {
+		fail(err)
+	}
+	printConfig(cfg)
+}
+
+func printConfig(cfg *appConfig) {
+	fmt.Printf("ollama_url:             %s\n", sanitizeForTerminal(cfg.OllamaURL))
+	fmt.Printf("ollama_embedding_model: %s\n", sanitizeForTerminal(cfg.OllamaEmbeddingModel))
+	fmt.Printf("ollama_chat_model:      %s\n", sanitizeForTerminal(cfg.OllamaChatModel))
+	fmt.Printf("qdrant_url:             %s\n", sanitizeForTerminal(cfg.QdrantURL))
+	fmt.Printf("qdrant_collection:      %s\n", sanitizeForTerminal(cfg.QdrantCollection))
+}
+
+func runReindex(args []string) {
+	fs := flag.NewFlagSet("reindex", flag.ExitOnError)
+	urlFlag := addURLFlag(fs)
+	fs.Parse(args)
+
+	result, err := newClient(*urlFlag).reindex()
+	if err != nil {
+		fail(err)
+	}
+	fmt.Printf("total:%d embedded:%d failed:%d\n", result.Total, result.Embedded, result.Failed)
 }
