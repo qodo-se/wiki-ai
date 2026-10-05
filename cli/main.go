@@ -88,6 +88,10 @@ list flags:
   --limit int    max number of notes to return per page (default 10)
   --offset int   number of notes to skip, for paging (default 0)
 
+search / search-hybrid flags:
+  --limit int    max number of results to return per page (default 10)
+  --offset int   number of results to skip, for paging (default 0)
+
 config set flags:
   --ollama-url string
   --ollama-embedding-model string
@@ -282,7 +286,8 @@ func runDelete(args []string) {
 
 func runSearch(args []string) {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
-	limit := fs.Int("limit", 10, "max number of results")
+	limit := fs.Int("limit", 10, "max number of results per page")
+	offset := fs.Int("offset", 0, "number of results to skip (for paging)")
 	urlFlag := addURLFlag(fs)
 	fs.Parse(args)
 	url := *urlFlag
@@ -291,14 +296,19 @@ func runSearch(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: wiki-cli search <query>")
 		os.Exit(1)
 	}
+	if *offset < 0 {
+		fmt.Fprintln(os.Stderr, "error: --offset must be >= 0")
+		os.Exit(1)
+	}
 
-	hits, err := newClient(url).search(fs.Arg(0), *limit)
+	resp, err := newClient(url).search(fs.Arg(0), *limit, *offset)
 	if err != nil {
 		fail(err)
 	}
-	for _, h := range hits {
+	for _, h := range resp.Items {
 		fmt.Printf("%s  %-30s %-20s matches:%-3d %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), int(h.Score), sanitizeForTerminal(h.Preview))
 	}
+	printSearchPageInfo(resp, *limit)
 }
 
 func runBackup(args []string) {
@@ -344,7 +354,8 @@ func runUploadImage(args []string) {
 
 func runHybridSearch(args []string) {
 	fs := flag.NewFlagSet("search-hybrid", flag.ExitOnError)
-	limit := fs.Int("limit", 10, "max number of results")
+	limit := fs.Int("limit", 10, "max number of results per page")
+	offset := fs.Int("offset", 0, "number of results to skip (for paging)")
 	urlFlag := addURLFlag(fs)
 	fs.Parse(args)
 	url := *urlFlag
@@ -353,13 +364,38 @@ func runHybridSearch(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: wiki-cli search-hybrid <query>")
 		os.Exit(1)
 	}
+	if *offset < 0 {
+		fmt.Fprintln(os.Stderr, "error: --offset must be >= 0")
+		os.Exit(1)
+	}
 
-	hits, err := newClient(url).hybridSearch(fs.Arg(0), *limit)
+	resp, err := newClient(url).hybridSearch(fs.Arg(0), *limit, *offset)
 	if err != nil {
 		fail(err)
 	}
-	for _, h := range hits {
+	for _, h := range resp.Items {
 		fmt.Printf("%s  %-30s %-20s score:%.4f %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), h.Score, sanitizeForTerminal(h.Preview))
+	}
+	printSearchPageInfo(resp, *limit)
+}
+
+// printSearchPageInfo mirrors runList's "showing X-Y of Z" / "next page:
+// --offset N" output, so paging through search results works the same way
+// as paging through the note list.
+func printSearchPageInfo(resp *searchResponse, limit int) {
+	if resp.Total == 0 {
+		fmt.Println("no matches")
+		return
+	}
+	if len(resp.Items) == 0 {
+		fmt.Printf("no matches at offset %d (%d total) — try a smaller --offset\n", resp.Offset, resp.Total)
+		return
+	}
+	shownFrom := resp.Offset + 1
+	shownTo := resp.Offset + len(resp.Items)
+	fmt.Printf("showing %d-%d of %d\n", shownFrom, shownTo, resp.Total)
+	if shownTo < resp.Total {
+		fmt.Printf("next page: --offset %d\n", resp.Offset+limit)
 	}
 }
 

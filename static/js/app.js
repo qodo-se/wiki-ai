@@ -387,15 +387,25 @@ async function renderSearch() {
         <ul id="search-results" class="${CLS.list}">
             <li class="${CLS.notice}">Type to search your notes.</li>
         </ul>
+        <div class="${CLS.pagination}">
+            <button id="search-prev-page-btn" class="${CLS.pageBtn}" disabled>Prev</button>
+            <span id="search-page-info" class="${CLS.pageInfo}"></span>
+            <button id="search-next-page-btn" class="${CLS.pageBtn}" disabled>Next</button>
+        </div>
     `;
 
     const input = document.getElementById('search-input');
     const results = document.getElementById('search-results');
     const keywordBtn = document.getElementById('mode-keyword-btn');
     const hybridBtn = document.getElementById('mode-hybrid-btn');
+    const prevBtn = document.getElementById('search-prev-page-btn');
+    const nextBtn = document.getElementById('search-next-page-btn');
+    const pageInfo = document.getElementById('search-page-info');
     let timer = null;
     let currentReqId = 0;
     let mode = 'keyword';
+    let offset = 0;
+    const PAGE_SIZE = 10;
 
     const ENDPOINTS = {
         keyword: '/api/v1/search',
@@ -421,14 +431,17 @@ async function renderSearch() {
         return Math.round(Math.min(1, score / RRF_SCORE_CEILING) * 100);
     }
 
-    async function runSearch(q) {
+    async function runSearch(q, nextOffset) {
         if (!q.trim()) {
             results.innerHTML = `<li class="${CLS.notice}">Type to search your notes.</li>`;
+            pageInfo.textContent = '';
+            prevBtn.disabled = true;
+            nextBtn.disabled = true;
             return;
         }
         const reqId = ++currentReqId;
         try {
-            const res = await fetch(ENDPOINTS[mode] + '?q=' + encodeURIComponent(q) + '&limit=10');
+            const res = await fetch(ENDPOINTS[mode] + '?q=' + encodeURIComponent(q) + `&limit=${PAGE_SIZE}&offset=${nextOffset}`);
             if (reqId !== currentReqId) return; // stale
             if (!res.ok) {
                 // Hybrid search fails hard (no silent fallback to keyword-only)
@@ -443,10 +456,24 @@ async function renderSearch() {
                 const hint = mode === 'hybrid' ? ' Try Keyword search instead.' : '';
                 throw new Error((detail || `HTTP ${res.status}`) + hint);
             }
-            const hits = await res.json();
+            const data = await res.json();
             if (reqId !== currentReqId) return; // stale
+
+            // Requested page is past the last valid one (e.g. notes were
+            // deleted elsewhere since the last load) — clamp back instead of
+            // rendering an impossible "11-10 of 10" range.
+            if (data.items.length === 0 && data.total > 0 && data.offset > 0) {
+                const lastPageOffset = Math.floor((data.total - 1) / PAGE_SIZE) * PAGE_SIZE;
+                if (lastPageOffset !== data.offset) return runSearch(q, lastPageOffset);
+            }
+
+            offset = data.offset;
+            const hits = data.items;
             if (!hits.length) {
                 results.innerHTML = `<li class="${CLS.notice}">No notes match "${escapeHtml(q)}".</li>`;
+                pageInfo.textContent = 'No matches';
+                prevBtn.disabled = true;
+                nextBtn.disabled = true;
                 return;
             }
             results.innerHTML = hits.map(n => `
@@ -462,9 +489,18 @@ async function renderSearch() {
                     </div>
                 </li>
             `).join('');
+
+            const shownFrom = data.total === 0 ? 0 : offset + 1;
+            const shownTo = offset + hits.length;
+            pageInfo.textContent = `${shownFrom}–${shownTo} of ${data.total}`;
+            prevBtn.disabled = offset === 0;
+            nextBtn.disabled = shownTo >= data.total;
         } catch (err) {
             if (reqId !== currentReqId) return;
             results.innerHTML = `<li class="${CLS.error}">Search failed: ${escapeHtml(err.message)}</li>`;
+            pageInfo.textContent = '';
+            prevBtn.disabled = true;
+            nextBtn.disabled = true;
         }
     }
 
@@ -473,14 +509,16 @@ async function renderSearch() {
         mode = next;
         keywordBtn.className = `${CLS.toggleBtn} ${mode === 'keyword' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
         hybridBtn.className = `${CLS.toggleBtn} ${mode === 'hybrid' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
-        runSearch(input.value);
+        runSearch(input.value, 0); // switching search type starts over from page 1
     }
 
     keywordBtn.addEventListener('click', () => setMode('keyword'));
     hybridBtn.addEventListener('click', () => setMode('hybrid'));
+    prevBtn.addEventListener('click', () => runSearch(input.value, Math.max(0, offset - PAGE_SIZE)));
+    nextBtn.addEventListener('click', () => runSearch(input.value, offset + PAGE_SIZE));
     input.addEventListener('input', () => {
         clearTimeout(timer);
-        timer = setTimeout(() => runSearch(input.value), 200);
+        timer = setTimeout(() => runSearch(input.value, 0), 200); // a new query starts over from page 1
     });
 }
 
