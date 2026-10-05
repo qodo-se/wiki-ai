@@ -406,16 +406,19 @@ async function renderSearch() {
     // meaningful to show as a "% match" badge.
     const MODES_WITH_MATCH_BADGE = new Set(['hybrid']);
 
-    // Benchmarked against keyword/semantic/hybrid/LLM-expanded-hybrid search
-    // (recall@5/@10, MRR, latency, across 11 hand-labeled queries): hybrid's
-    // fused RRF score sits in a narrow band regardless of actual relevance,
-    // so mapping it linearly to 0-100% would make every result look like a
-    // similarly-strong match. Scaling relative to this result set's own
-    // min/max instead shows how much better the top hits are than the
-    // weaker ones in the list.
-    function relativeMatchPercent(score, min, max) {
-        if (max === min) return 100;
-        return Math.round(((score - min) / (max - min)) * 100);
+    // Reciprocal Rank Fusion has a fixed, known ceiling independent of any
+    // particular result batch: a note ranked #1 in BOTH the keyword and
+    // semantic lists scores exactly 2/(k+1) (k must match backend/search.py's
+    // _RRF_K). Normalizing against that fixed ceiling — instead of this
+    // batch's own min/max — avoids exaggerating a real-but-moderate gap
+    // (e.g. "hit both lists" vs. "hit only one list") into a misleading
+    // near-0% cliff for every result below it, the way batch-relative
+    // scaling did.
+    const RRF_K = 60;
+    const RRF_SCORE_CEILING = 2 / (RRF_K + 1);
+
+    function matchPercent(score) {
+        return Math.round(Math.min(1, score / RRF_SCORE_CEILING) * 100);
     }
 
     async function runSearch(q) {
@@ -446,9 +449,6 @@ async function renderSearch() {
                 results.innerHTML = `<li class="${CLS.notice}">No notes match "${escapeHtml(q)}".</li>`;
                 return;
             }
-            const scores = hits.map(n => n.score);
-            const minScore = Math.min(...scores);
-            const maxScore = Math.max(...scores);
             results.innerHTML = hits.map(n => `
                 <li class="${CLS.item}">
                     <div class="${CLS.itemBody}">
@@ -457,7 +457,7 @@ async function renderSearch() {
                         <div class="${CLS.snippet}">${escapeHtml(n.preview || '')}</div>
                     </div>
                     <div class="flex flex-col items-end gap-1 shrink-0">
-                        ${MODES_WITH_MATCH_BADGE.has(mode) ? `<span class="${CLS.matchBadge}">${relativeMatchPercent(n.score, minScore, maxScore)}% match</span>` : ''}
+                        ${MODES_WITH_MATCH_BADGE.has(mode) ? `<span class="${CLS.matchBadge}">${matchPercent(n.score)}% match</span>` : ''}
                         <time class="${CLS.itemTime}">${escapeHtml(formatDate(n.created_at))}</time>
                     </div>
                 </li>
