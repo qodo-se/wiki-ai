@@ -4,7 +4,7 @@ import threading
 from chunking import chunk_content, chunk_point_id
 from db import connect
 from embeddings import EmbeddingError, embed_text
-from vectorstore import VectorStoreError, delete_collection, upsert_vector
+from vectorstore import VectorStoreError, delete_collection, upsert_vectors
 
 _reindex_lock = threading.Lock()
 
@@ -52,8 +52,12 @@ def reindex_notes() -> dict:
         embedded = 0
         for note_id, vectors in note_vectors:
             try:
-                for i, vector in enumerate(vectors):
-                    upsert_vector(chunk_point_id(note_id, i), vector, payload={"note_id": note_id})
+                upsert_vectors(
+                    [
+                        (chunk_point_id(note_id, i), vector, {"note_id": note_id, "chunk_index": i})
+                        for i, vector in enumerate(vectors)
+                    ]
+                )
             except VectorStoreError as e:
                 print(f"warning: failed to upsert vectors for note {note_id}: {e}", file=sys.stderr)
                 failed += 1

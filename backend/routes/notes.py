@@ -12,7 +12,7 @@ from db import connect
 from embeddings import EmbeddingError, embed_text
 from paths import normalize_path
 from routes.images import delete_note_images
-from vectorstore import VectorStoreError, delete_vectors_for_note, upsert_vector
+from vectorstore import VectorStoreError, delete_stale_chunks, delete_vectors_for_note, upsert_vectors
 
 router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
 
@@ -21,15 +21,23 @@ def _sync_embedding(note_id: str, content: str) -> None:
     # Semantic search is a best-effort add-on — a down/unconfigured Ollama or
     # Qdrant must never block saving a note.
     try:
-        # Embed everything before deleting the note's existing chunk-points —
-        # same ordering/reasoning as reindex_notes(): a transient embedding
-        # failure must leave the note's prior (stale but still searchable)
-        # vectors in place rather than wiping them out with nothing to
-        # replace them.
-        vectors = [embed_text(chunk) for chunk in chunk_content(content)]
-        delete_vectors_for_note(note_id)
-        for i, vector in enumerate(vectors):
-            upsert_vector(chunk_point_id(note_id, i), vector, payload={"note_id": note_id})
+        # Embed everything, then upsert the new chunks in place at their
+        # deterministic point ids (overwriting same-index chunks from the
+        # note's previous version), and only then delete any leftover
+        # chunk-points beyond the new count (from a note that shrank). This
+        # ordering means a failure at any step never leaves fewer working
+        # vectors than before the save: an embedding failure touches nothing,
+        # and an upsert failure on one chunk leaves that chunk's previous
+        # vector untouched rather than deleted-with-nothing-to-replace-it.
+        chunks = chunk_content(content)
+        vectors = [embed_text(chunk) for chunk in chunks]
+        upsert_vectors(
+            [
+                (chunk_point_id(note_id, i), vector, {"note_id": note_id, "chunk_index": i})
+                for i, vector in enumerate(vectors)
+            ]
+        )
+        delete_stale_chunks(note_id, keep_count=len(vectors))
     except (EmbeddingError, VectorStoreError) as e:
         print(f"warning: failed to embed note {note_id}: {e}", file=sys.stderr)
 
