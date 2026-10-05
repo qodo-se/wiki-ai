@@ -519,30 +519,6 @@ func TestSearchRequest(t *testing.T) {
 	}
 }
 
-func TestSemanticSearchRequest(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/search/semantic" {
-			t.Errorf("path = %q", r.URL.Path)
-		}
-		if got := r.URL.Query().Get("q"); got != "hello world" {
-			t.Errorf("q = %q", got)
-		}
-		if got := r.URL.Query().Get("limit"); got != "7" {
-			t.Errorf("limit = %q", got)
-		}
-		json.NewEncoder(w).Encode([]searchHit{{ID: "x"}})
-	}))
-	defer srv.Close()
-
-	hits, err := newClient(srv.URL).semanticSearch("hello world", 7)
-	if err != nil {
-		t.Fatalf("semanticSearch: %v", err)
-	}
-	if len(hits) != 1 || hits[0].ID != "x" {
-		t.Fatalf("unexpected hits: %+v", hits)
-	}
-}
-
 func TestNon2xxReturnsAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -563,6 +539,98 @@ func TestNon2xxReturnsAPIError(t *testing.T) {
 	}
 	if !strings.Contains(apiErr.Error(), "note not found") {
 		t.Fatalf("error message missing body: %v", apiErr)
+	}
+}
+
+func TestHybridSearchRequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/search/hybrid" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("q"); got != "hello world" {
+			t.Errorf("q = %q", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "7" {
+			t.Errorf("limit = %q", got)
+		}
+		json.NewEncoder(w).Encode([]searchHit{{ID: "x", Score: 0.0164}})
+	}))
+	defer srv.Close()
+
+	hits, err := newClient(srv.URL).hybridSearch("hello world", 7)
+	if err != nil {
+		t.Fatalf("hybridSearch: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ID != "x" || hits[0].Score != 0.0164 {
+		t.Fatalf("unexpected hits: %+v", hits)
+	}
+}
+
+func TestGetConfig(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/api/v1/config" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(appConfig{
+			OllamaURL: "http://ollama:11434", OllamaEmbeddingModel: "nomic-embed-text",
+			OllamaChatModel: "gemma4:e4b", QdrantURL: "http://qdrant:6333", QdrantCollection: "notes",
+		})
+	}))
+	defer srv.Close()
+
+	cfg, err := newClient(srv.URL).getConfig()
+	if err != nil {
+		t.Fatalf("getConfig: %v", err)
+	}
+	if cfg.OllamaEmbeddingModel != "nomic-embed-text" {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestSetConfigSendsOnlyProvidedFields(t *testing.T) {
+	var gotBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("method = %s, want PUT", r.Method)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(appConfig{OllamaEmbeddingModel: "qwen3-embedding:4b"})
+	}))
+	defer srv.Close()
+
+	cfg, err := newClient(srv.URL).setConfig(map[string]string{"ollama_embedding_model": "qwen3-embedding:4b"})
+	if err != nil {
+		t.Fatalf("setConfig: %v", err)
+	}
+	if len(gotBody) != 1 || gotBody["ollama_embedding_model"] != "qwen3-embedding:4b" {
+		t.Fatalf("unexpected request body: %+v", gotBody)
+	}
+	if cfg.OllamaEmbeddingModel != "qwen3-embedding:4b" {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestReindex(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/api/v1/search/reindex" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(reindexResult{Total: 9, Embedded: 9, Failed: 0})
+	}))
+	defer srv.Close()
+
+	result, err := newClient(srv.URL).reindex()
+	if err != nil {
+		t.Fatalf("reindex: %v", err)
+	}
+	if result.Total != 9 || result.Embedded != 9 || result.Failed != 0 {
+		t.Fatalf("unexpected result: %+v", result)
 	}
 }
 

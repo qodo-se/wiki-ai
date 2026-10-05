@@ -19,7 +19,9 @@ def test_reindex_deletes_collection_then_reembeds_every_note(monkeypatch):
     monkeypatch.setattr(reindex, "delete_collection", lambda: calls.append("delete"))
     monkeypatch.setattr(reindex, "embed_text", lambda content: [0.1])
     monkeypatch.setattr(
-        reindex, "upsert_vector", lambda note_id, vector: calls.append(("upsert", note_id))
+        reindex,
+        "upsert_vector",
+        lambda point_id, vector, payload=None: calls.append(("upsert", payload["note_id"])),
     )
 
     result = reindex.reindex_notes()
@@ -28,6 +30,28 @@ def test_reindex_deletes_collection_then_reembeds_every_note(monkeypatch):
     assert ("upsert", "n1") in calls
     assert ("upsert", "n2") in calls
     assert result == {"total": 2, "embedded": 2, "failed": 0}
+
+
+def test_reindex_chunks_each_note_into_multiple_points(monkeypatch):
+    # "hello\n\nworld" is two paragraphs -> two chunks, so one note should
+    # produce two upserted points, each tagged with the same note_id.
+    _insert_note("n1", "hello\n\nworld")
+
+    monkeypatch.setattr(reindex, "delete_collection", lambda: None)
+    monkeypatch.setattr(reindex, "embed_text", lambda content: [0.1])
+    upserted = []
+    monkeypatch.setattr(
+        reindex,
+        "upsert_vector",
+        lambda point_id, vector, payload=None: upserted.append((point_id, payload["note_id"])),
+    )
+
+    result = reindex.reindex_notes()
+
+    assert len(upserted) == 2
+    assert {p[1] for p in upserted} == {"n1"}
+    assert len({p[0] for p in upserted}) == 2  # distinct point ids per chunk
+    assert result == {"total": 1, "embedded": 1, "failed": 0}
 
 
 def test_reindex_counts_per_note_failures_without_aborting(monkeypatch):
@@ -42,7 +66,7 @@ def test_reindex_counts_per_note_failures_without_aborting(monkeypatch):
         return [0.1]
 
     monkeypatch.setattr(reindex, "embed_text", fake_embed)
-    monkeypatch.setattr(reindex, "upsert_vector", lambda note_id, vector: None)
+    monkeypatch.setattr(reindex, "upsert_vector", lambda point_id, vector, payload=None: None)
 
     result = reindex.reindex_notes()
 

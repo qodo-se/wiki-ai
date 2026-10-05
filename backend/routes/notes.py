@@ -7,11 +7,12 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
 from categorize import ReorganizeInProgress, reorganize_notes
+from chunking import chunk_content, chunk_point_id
 from db import connect
 from embeddings import EmbeddingError, embed_text
 from paths import normalize_path
 from routes.images import delete_note_images
-from vectorstore import VectorStoreError, delete_vector, upsert_vector
+from vectorstore import VectorStoreError, delete_vectors_for_note, upsert_vector
 
 router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
 
@@ -20,17 +21,24 @@ def _sync_embedding(note_id: str, content: str) -> None:
     # Semantic search is a best-effort add-on — a down/unconfigured Ollama or
     # Qdrant must never block saving a note.
     try:
-        vector = embed_text(content)
-        upsert_vector(note_id, vector)
+        # Embed everything before deleting the note's existing chunk-points —
+        # same ordering/reasoning as reindex_notes(): a transient embedding
+        # failure must leave the note's prior (stale but still searchable)
+        # vectors in place rather than wiping them out with nothing to
+        # replace them.
+        vectors = [embed_text(chunk) for chunk in chunk_content(content)]
+        delete_vectors_for_note(note_id)
+        for i, vector in enumerate(vectors):
+            upsert_vector(chunk_point_id(note_id, i), vector, payload={"note_id": note_id})
     except (EmbeddingError, VectorStoreError) as e:
         print(f"warning: failed to embed note {note_id}: {e}", file=sys.stderr)
 
 
 def _delete_embedding(note_id: str) -> None:
     try:
-        delete_vector(note_id)
+        delete_vectors_for_note(note_id)
     except VectorStoreError as e:
-        print(f"warning: failed to delete vector for note {note_id}: {e}", file=sys.stderr)
+        print(f"warning: failed to delete vectors for note {note_id}: {e}", file=sys.stderr)
 
 
 def _delete_images(note_id: str) -> None:

@@ -118,6 +118,48 @@ def test_delete_collection_raises_on_error_status():
             assert False, "expected VectorStoreError"
 
 
+def test_delete_vectors_for_note_filters_by_note_id_payload():
+    config.set_config({"qdrant_url": "http://qdrant-test:6333", "qdrant_collection": "notes"})
+    calls = []
+
+    def fake_urlopen(req, timeout=30):
+        calls.append((req.get_method(), req.full_url, json.loads(req.data)))
+        return _FakeResp(200, {"result": True, "status": "ok"})
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        vectorstore.delete_vectors_for_note("note-1")
+
+    assert len(calls) == 1
+    method, url, body = calls[0]
+    assert method == "POST"
+    assert url == "http://qdrant-test:6333/collections/notes/points/delete"
+    assert body == {"filter": {"must": [{"key": "note_id", "match": {"value": "note-1"}}]}}
+
+
+def test_delete_vectors_for_note_raises_on_error_status():
+    config.set_config({"qdrant_url": "http://qdrant-test:6333", "qdrant_collection": "notes"})
+    with patch("urllib.request.urlopen", return_value=_FakeResp(500, {"status": "error"})):
+        try:
+            vectorstore.delete_vectors_for_note("note-1")
+        except vectorstore.VectorStoreError:
+            pass
+        else:
+            assert False, "expected VectorStoreError"
+
+
+def test_delete_vectors_for_note_treats_missing_collection_as_success():
+    # A fresh install (or a note created before the collection has ever been
+    # created by an upsert) must not fail here — there's simply nothing yet
+    # to delete.
+    config.set_config({"qdrant_url": "http://qdrant-test:6333", "qdrant_collection": "notes"})
+
+    def fake_urlopen(req, timeout=30):
+        raise _http_error(req.full_url, 404, {})
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        vectorstore.delete_vectors_for_note("note-1")  # must not raise
+
+
 def test_request_survives_non_json_error_body():
     config.set_config({"qdrant_url": "http://qdrant-test:6333", "qdrant_collection": "notes"})
 

@@ -106,11 +106,12 @@ type noteMeta struct {
 }
 
 type searchHit struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Path      string `json:"path"`
-	Preview   string `json:"preview"`
-	CreatedAt string `json:"created_at"`
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	Path      string  `json:"path"`
+	Preview   string  `json:"preview"`
+	Score     float64 `json:"score"`
+	CreatedAt string  `json:"created_at"`
 }
 
 type noteListResponse struct {
@@ -379,8 +380,8 @@ func filenameFromContentDisposition(header string) string {
 	return params["filename"]
 }
 
-func (c *client) semanticSearch(query string, limit int) ([]searchHit, error) {
-	body, err := c.do(http.MethodGet, "/api/v1/search/semantic", url.Values{
+func (c *client) hybridSearch(query string, limit int) ([]searchHit, error) {
+	body, err := c.do(http.MethodGet, "/api/v1/search/hybrid", url.Values{
 		"q":     {query},
 		"limit": {fmt.Sprint(limit)},
 	}, nil)
@@ -392,4 +393,65 @@ func (c *client) semanticSearch(query string, limit int) ([]searchHit, error) {
 		return nil, err
 	}
 	return hits, nil
+}
+
+type appConfig struct {
+	OllamaURL            string `json:"ollama_url"`
+	OllamaEmbeddingModel string `json:"ollama_embedding_model"`
+	OllamaChatModel      string `json:"ollama_chat_model"`
+	QdrantURL            string `json:"qdrant_url"`
+	QdrantCollection     string `json:"qdrant_collection"`
+}
+
+func (c *client) getConfig() (*appConfig, error) {
+	body, err := c.do(http.MethodGet, "/api/v1/config", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var cfg appConfig
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// setConfig only sends the fields present in updates — the server leaves
+// every other setting untouched, same as a partial PUT.
+func (c *client) setConfig(updates map[string]string) (*appConfig, error) {
+	payload, err := json.Marshal(updates)
+	if err != nil {
+		return nil, err
+	}
+	body, err := c.do(http.MethodPut, "/api/v1/config", nil, payload)
+	if err != nil {
+		return nil, err
+	}
+	var cfg appConfig
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+type reindexResult struct {
+	Total    int `json:"total"`
+	Embedded int `json:"embedded"`
+	Failed   int `json:"failed"`
+}
+
+// reindex re-embeds every note synchronously server-side, so its duration
+// scales with note/chunk count the same way a backup's does — uses
+// backupHTTP (no timeout) rather than the 10s budget every other (small,
+// fast) request uses, so a legitimately-still-running rebuild isn't reported
+// as a client-side failure.
+func (c *client) reindex() (*reindexResult, error) {
+	body, err := c.doWithClient(c.backupHTTP, http.MethodPost, "/api/v1/search/reindex", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var result reindexResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }

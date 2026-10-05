@@ -82,15 +82,18 @@ def delete_collection() -> None:
         raise VectorStoreError(f"could not delete Qdrant collection: {resp}")
 
 
-def delete_vector(point_id: str) -> None:
+def delete_vectors_for_note(note_id: str) -> None:
+    # A note embeds as multiple chunk-points now (see chunking.py), so
+    # deleting it means deleting every point tagged with its note_id payload,
+    # not a single point keyed by the note's own id.
     _, collection = _cfg()
     status, resp = _request(
         "POST",
         f"/collections/{collection}/points/delete",
-        {"points": [point_id]},
+        {"filter": {"must": [{"key": "note_id", "match": {"value": note_id}}]}},
     )
-    if status not in (200, 201):
-        raise VectorStoreError(f"could not delete vector: {resp}")
+    if status not in (200, 201, 404):  # 404: collection doesn't exist yet — nothing to delete
+        raise VectorStoreError(f"could not delete vectors for note: {resp}")
 
 
 def search_vectors(vector: list[float], limit: int) -> list[dict]:

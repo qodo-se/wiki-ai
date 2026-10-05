@@ -18,6 +18,7 @@ const CLS = {
     searchInput: 'block w-full max-w-[1200px] mx-auto mb-5 px-4 py-3 text-base bg-white border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:border-gray-500',
     editor: 'max-w-[1200px] mx-auto bg-white rounded-lg shadow-md overflow-hidden',
     pathBadge: 'text-gray-400 text-xs font-mono truncate',
+    matchBadge: 'text-gray-500 text-xs font-medium shrink-0',
     pathRow: 'max-w-[1200px] mx-auto mb-4 flex items-center gap-2',
     pathLabel: 'text-gray-500 text-sm shrink-0',
     pathInput: 'flex-1 min-w-0 px-3 py-1.5 text-sm font-mono bg-white border border-gray-300 rounded-md focus:outline-none focus:border-gray-500',
@@ -380,7 +381,7 @@ async function renderSearch() {
         </div>
         <div class="${CLS.viewToggle}">
             <button id="mode-keyword-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnActive}">Keyword</button>
-            <button id="mode-semantic-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnInactive}">Semantic</button>
+            <button id="mode-hybrid-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnInactive}">Hybrid</button>
         </div>
         <input id="search-input" class="${CLS.searchInput}" type="search" placeholder="Search your notes…" autocomplete="off" autofocus />
         <ul id="search-results" class="${CLS.list}">
@@ -391,15 +392,31 @@ async function renderSearch() {
     const input = document.getElementById('search-input');
     const results = document.getElementById('search-results');
     const keywordBtn = document.getElementById('mode-keyword-btn');
-    const semanticBtn = document.getElementById('mode-semantic-btn');
+    const hybridBtn = document.getElementById('mode-hybrid-btn');
     let timer = null;
     let currentReqId = 0;
     let mode = 'keyword';
 
     const ENDPOINTS = {
         keyword: '/api/v1/search',
-        semantic: '/api/v1/search/semantic',
+        hybrid: '/api/v1/search/hybrid',
     };
+    // Keyword mode's score is a literal occurrence count, not a relevance
+    // score comparable across notes — only hybrid's fused score is
+    // meaningful to show as a "% match" badge.
+    const MODES_WITH_MATCH_BADGE = new Set(['hybrid']);
+
+    // Benchmarked against keyword/semantic/hybrid/LLM-expanded-hybrid search
+    // (recall@5/@10, MRR, latency, across 11 hand-labeled queries): hybrid's
+    // fused RRF score sits in a narrow band regardless of actual relevance,
+    // so mapping it linearly to 0-100% would make every result look like a
+    // similarly-strong match. Scaling relative to this result set's own
+    // min/max instead shows how much better the top hits are than the
+    // weaker ones in the list.
+    function relativeMatchPercent(score, min, max) {
+        if (max === min) return 100;
+        return Math.round(((score - min) / (max - min)) * 100);
+    }
 
     async function runSearch(q) {
         if (!q.trim()) {
@@ -417,6 +434,9 @@ async function renderSearch() {
                 results.innerHTML = `<li class="${CLS.notice}">No notes match "${escapeHtml(q)}".</li>`;
                 return;
             }
+            const scores = hits.map(n => n.score);
+            const minScore = Math.min(...scores);
+            const maxScore = Math.max(...scores);
             results.innerHTML = hits.map(n => `
                 <li class="${CLS.item}">
                     <div class="${CLS.itemBody}">
@@ -424,7 +444,10 @@ async function renderSearch() {
                         <div class="${CLS.pathBadge}">${escapeHtml(n.path || '/')}</div>
                         <div class="${CLS.snippet}">${escapeHtml(n.preview || '')}</div>
                     </div>
-                    <time class="${CLS.itemTime}">${escapeHtml(formatDate(n.created_at))}</time>
+                    <div class="flex flex-col items-end gap-1 shrink-0">
+                        ${MODES_WITH_MATCH_BADGE.has(mode) ? `<span class="${CLS.matchBadge}">${relativeMatchPercent(n.score, minScore, maxScore)}% match</span>` : ''}
+                        <time class="${CLS.itemTime}">${escapeHtml(formatDate(n.created_at))}</time>
+                    </div>
                 </li>
             `).join('');
         } catch (err) {
@@ -437,12 +460,12 @@ async function renderSearch() {
         if (mode === next) return;
         mode = next;
         keywordBtn.className = `${CLS.toggleBtn} ${mode === 'keyword' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
-        semanticBtn.className = `${CLS.toggleBtn} ${mode === 'semantic' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
+        hybridBtn.className = `${CLS.toggleBtn} ${mode === 'hybrid' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
         runSearch(input.value);
     }
 
     keywordBtn.addEventListener('click', () => setMode('keyword'));
-    semanticBtn.addEventListener('click', () => setMode('semantic'));
+    hybridBtn.addEventListener('click', () => setMode('hybrid'));
     input.addEventListener('input', () => {
         clearTimeout(timer);
         timer = setTimeout(() => runSearch(input.value), 200);
