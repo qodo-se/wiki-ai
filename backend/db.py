@@ -2,6 +2,7 @@ import datetime
 import glob
 import os
 import sqlite3
+import sys
 import threading
 import zipfile
 
@@ -38,6 +39,10 @@ CREATE TABLE IF NOT EXISTS notes (
 CREATE TABLE IF NOT EXISTS config (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS embedding_index_state (
+    version INTEGER NOT NULL
 );
 """
 
@@ -267,6 +272,98 @@ def _apply_migrations(conn: sqlite3.Connection, current: int, db_existed: bool) 
         raise
 
 
+# Bump this whenever the embedding/chunking format changes (what gets embedded, or
+# how a note is split into vectors) — not for every release. Unlike MIGRATIONS, this
+# isn't an ordered log: it's a single current/stale comparison, since a format change
+# always means "throw out every vector and re-embed everything", never an incremental
+# step. A mismatch (or no stored version at all, e.g. upgrading from before this
+# existed) triggers a full reindex the next time connect() runs, so existing notes
+# don't silently fall out of semantic/hybrid search waiting on someone to notice
+# docs/UPGRADING.md and run one by hand.
+EMBEDDING_INDEX_VERSION = 1
+
+
+def _embedding_index_version(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT version FROM embedding_index_state").fetchone()
+    return row[0] if row else 0
+
+
+def _mark_embedding_index_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute("DELETE FROM embedding_index_state")
+    conn.execute("INSERT INTO embedding_index_state (version) VALUES (?)", (version,))
+    conn.commit()
+
+
+# connect() isn't just a startup call — every request that touches the database calls
+# it again — so the version check below must run at most once per process, not once
+# per connect() call. Without this, a down Ollama/Qdrant would turn every single
+# request (note reads, config, unrelated to search) into another corpus-wide reindex
+# attempt for as long as the outage lasts, instead of actually waiting for a restart
+# the way the retry messages below claim.
+_embedding_reindex_checked = False
+_embedding_reindex_check_lock = threading.Lock()
+
+
+def _reindex_if_embedding_format_changed(conn: sqlite3.Connection) -> None:
+    # Deliberately runs outside the `with _migration_lock:` block in connect(): it may
+    # call reindex_notes(), which itself calls connect() to read notes, and the lock
+    # above is a plain (non-reentrant) threading.Lock — holding it here would deadlock
+    # that nested call. Also keeps a slow, network-dependent reindex out of the
+    # schema-migration transaction's critical section.
+    global _embedding_reindex_checked
+    with _embedding_reindex_check_lock:
+        if _embedding_reindex_checked:
+            return
+        # Set before doing any of the work below (not after): this is also what
+        # keeps reindex_notes()'s own nested `with connect() as db:` call from
+        # recursing back into this function — by the time that nested connect()
+        # runs, this flag is already set, so it returns immediately instead of
+        # trying to start a second concurrent reindex.
+        _embedding_reindex_checked = True
+
+    if _embedding_index_version(conn) >= EMBEDDING_INDEX_VERSION:
+        return
+
+    note_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+    if note_count == 0:
+        # Nothing to embed yet — mark current without requiring Ollama/Qdrant to be
+        # reachable just to boot a brand-new, empty wiki (or run the test suite,
+        # which creates a fresh empty database on every test).
+        _mark_embedding_index_version(conn, EMBEDDING_INDEX_VERSION)
+        return
+
+    # Lazy import: reindex.py imports connect() from this module.
+    import reindex
+
+    try:
+        result = reindex.reindex_notes()
+    except (reindex.EmbeddingError, reindex.VectorStoreError) as e:
+        # Same principle this app already applies when saving a note: a down
+        # embedding service should never block using the rest of the wiki. Leave
+        # the stored version unset so this retries on the next process restart.
+        print(
+            f"warning: automatic reindex to embedding format v{EMBEDDING_INDEX_VERSION} "
+            f"failed, will retry on next startup: {e}",
+            file=sys.stderr,
+        )
+        return
+
+    if result["failed"]:
+        # A format-version reindex re-embeds every note, so a note that failed here
+        # isn't some pre-existing, already-known gap — leave the version unmarked so
+        # a future restart retries it, rather than silently settling for an
+        # incomplete index until the next format bump.
+        print(
+            f"warning: automatic reindex to embedding format v{EMBEDDING_INDEX_VERSION} "
+            f"completed with {result['failed']} of {result['total']} note(s) failing, "
+            f"will retry on next startup",
+            file=sys.stderr,
+        )
+        return
+
+    _mark_embedding_index_version(conn, EMBEDDING_INDEX_VERSION)
+
+
 def connect() -> sqlite3.Connection:
     _validate_migrations()
     db_existed = os.path.exists(DB_PATH)
@@ -281,6 +378,7 @@ def connect() -> sqlite3.Connection:
             current = _check_not_too_new(conn)
             conn.executescript(BASE_SCHEMA)
             _apply_migrations(conn, current, db_existed)
+        _reindex_if_embedding_format_changed(conn)
     except Exception:
         conn.close()
         raise
