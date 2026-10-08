@@ -321,7 +321,13 @@ def _reindex_if_embedding_format_changed(conn: sqlite3.Connection) -> None:
         # trying to start a second concurrent reindex.
         _embedding_reindex_checked = True
 
-    if _embedding_index_version(conn) >= EMBEDDING_INDEX_VERSION:
+    # Equality, not >=: unlike schema_migrations this isn't an ordered log where
+    # "ahead" is always safe, it's a single current/stale comparison (see
+    # EMBEDDING_INDEX_VERSION above) — a stored version from a *newer* build (e.g.
+    # after rolling back to this one) means the current code's embedding/chunking
+    # logic doesn't match what's actually in Qdrant either, so it needs the same
+    # full reindex as being behind does.
+    if _embedding_index_version(conn) == EMBEDDING_INDEX_VERSION:
         return
 
     note_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
