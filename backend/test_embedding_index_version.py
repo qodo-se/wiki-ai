@@ -36,6 +36,29 @@ def test_reindex_is_triggered_when_stored_version_is_behind(monkeypatch):
     assert db._embedding_index_version(conn) == db.EMBEDDING_INDEX_VERSION
 
 
+def test_reindex_is_triggered_when_stored_version_is_newer_than_code(monkeypatch):
+    # A rollback to an older build after the database was already reindexed to a
+    # newer embedding format — the older code's vector logic doesn't match what's
+    # actually in Qdrant either, so this needs the same reindex as being behind does.
+    conn = db.connect()
+    conn.execute("INSERT INTO notes (id, content) VALUES ('n1', 'hello')")
+    db._mark_embedding_index_version(conn, db.EMBEDDING_INDEX_VERSION + 1)
+    conn.commit()
+
+    import reindex
+
+    calls = []
+    monkeypatch.setattr(
+        reindex, "reindex_notes", lambda: calls.append(True) or {"total": 1, "embedded": 1, "failed": 0}
+    )
+    monkeypatch.setattr(db, "_embedding_reindex_checked", False)  # simulate the next process restart
+
+    conn = db.connect()
+
+    assert calls == [True]
+    assert db._embedding_index_version(conn) == db.EMBEDDING_INDEX_VERSION
+
+
 def test_reindex_is_skipped_once_version_is_current(monkeypatch):
     conn = db.connect()  # 0 notes — fast path already marks the version current
     conn.execute("INSERT INTO notes (id, content) VALUES ('n1', 'hello')")
