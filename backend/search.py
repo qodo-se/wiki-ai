@@ -97,12 +97,19 @@ def keyword_matches(query: str) -> list[SearchHit]:
                 created_at=row[4],
             )
         )
-    # id as a tiebreaker (unique per note) gives pagination a fully
-    # deterministic order — ties on score alone could otherwise fall back to
-    # SQLite's unspecified order for ties in "ORDER BY created_at", which
-    # isn't guaranteed stable across requests and could shift a note across
-    # a page boundary between one page load and the next.
-    hits.sort(key=lambda h: (-h.score, h.id))
+    # Three stable passes, least significant key first: id (a final,
+    # guaranteed-unique tiebreaker so pagination has a fully deterministic
+    # order — ties on score and created_at alike could otherwise fall back to
+    # SQLite's unspecified order, which isn't guaranteed stable across
+    # requests and could shift a note across a page boundary between one page
+    # load and the next), then created_at desc (so same-score notes still
+    # rank newest-first, same as before), then score desc (primary key).
+    # Python's sort is stable, so each pass's ties keep the previous pass's
+    # order — this achieves a correct multi-key sort without needing to
+    # negate the string-typed created_at for a single sort() call.
+    hits.sort(key=lambda h: h.id)
+    hits.sort(key=lambda h: h.created_at, reverse=True)
+    hits.sort(key=lambda h: h.score, reverse=True)
     return hits
 
 

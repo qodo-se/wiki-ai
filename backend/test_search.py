@@ -2,12 +2,18 @@ import db
 import search
 
 
-def _insert_note(note_id, content, path="/", title=""):
+def _insert_note(note_id, content, path="/", title="", created_at=None):
     with db.connect() as conn:
-        conn.execute(
-            "INSERT INTO notes (id, content, path, title) VALUES (?, ?, ?, ?)",
-            (note_id, content, path, title),
-        )
+        if created_at is None:
+            conn.execute(
+                "INSERT INTO notes (id, content, path, title) VALUES (?, ?, ?, ?)",
+                (note_id, content, path, title),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO notes (id, content, path, title, created_at) VALUES (?, ?, ?, ?, ?)",
+                (note_id, content, path, title, created_at),
+            )
 
 
 def test_keyword_matches_matches_whole_words_not_substrings():
@@ -44,6 +50,30 @@ def test_keyword_matches_a_query_ending_in_punctuation():
     hits = search.keyword_matches("C++")
 
     assert len(hits) == 1
+
+
+def test_keyword_matches_breaks_score_ties_by_newest_first():
+    # A naive id-only tiebreaker is "stable for pagination" but loses the
+    # genuinely useful ordering: among equally-scored notes, the one you
+    # created or edited most recently should surface first.
+    _insert_note("older", "car", created_at="2026-01-01 00:00:00")
+    _insert_note("newer", "car", created_at="2026-01-02 00:00:00")
+
+    hits = search.keyword_matches("car")
+
+    assert [h.id for h in hits] == ["newer", "older"]
+
+
+def test_keyword_matches_breaks_remaining_ties_by_id_deterministically():
+    # Two notes can share the same created_at (e.g. bulk-created in the same
+    # second) — the final id tiebreak must still produce a fully
+    # deterministic order so pagination never skips or duplicates a note.
+    _insert_note("bbb", "car", created_at="2026-01-01 00:00:00")
+    _insert_note("aaa", "car", created_at="2026-01-01 00:00:00")
+
+    hits = search.keyword_matches("car")
+
+    assert [h.id for h in hits] == ["aaa", "bbb"]
 
 
 def test_semantic_search_empty_query_short_circuits(monkeypatch):

@@ -27,28 +27,43 @@ the app refuses to start rather than risk operating on a shape it doesn't recogn
 
 ## Semantic search index format changes
 
-Unlike the SQLite schema, the Qdrant vector index has no automatic migration — nothing
-on startup checks whether the vectors already in Qdrant match the shape the running
-code expects. What happens next depends on whether the change alters the vector
-*dimension*:
+Like the SQLite schema, the Qdrant vector index format has a version check on startup:
+the running code carries a hardcoded `EMBEDDING_INDEX_VERSION` (`backend/db.py`),
+compared against the version recorded in the database. If they don't match — including
+upgrading from a build that predates this check — the app automatically runs a full
+reindex (the same operation `POST /api/v1/search/reindex` runs on demand) before it
+starts serving requests, so you never need to notice a release note and reindex by hand.
+The reindex runs synchronously before the app starts serving requests, so if Ollama or
+Qdrant happen to be unreachable, startup is delayed by however long those requests take
+to time out — but it isn't blocked indefinitely: once that fails, the app still starts
+(a down embedding service never permanently locks you out of the rest of the wiki,
+same as everywhere else in this app), logging a warning and retrying the reindex on the
+next restart. The same applies if the service is reachable but a specific note's
+content keeps failing to embed: the version stays unmarked and every note is retried on
+each subsequent restart until it succeeds, rather than settling for an index that's
+silently missing that note — check the logs if restarts keep taking longer than
+expected.
 
-- **Same dimension** (e.g. this app's whole-note-per-vector → one-vector-per-paragraph-
-  chunk change) — silent. Old notes' existing vectors simply won't match what the new
-  code looks for, so those notes stop contributing to semantic/hybrid search results,
-  but nothing errors. New notes created or edited after the upgrade are unaffected,
-  since they're always embedded fresh in the new format.
-- **Different dimension** (e.g. switching `ollama_embedding_model` to a model that
-  produces a different-sized vector) — loud. Qdrant rejects both searches and new
-  vector writes against the mismatched collection, so hybrid search starts returning
-  errors immediately, and new/edited notes save fine but silently get no vector
-  (logged as a server-side warning) until you reindex. Reindexing fixes this
-  immediately: it drops and recreates the collection from scratch, so it never hits
-  the mismatch itself.
+This check only covers format changes shipped in the app's own code. Changing
+`ollama_embedding_model` yourself (**Settings**) is a configuration change, not a code
+upgrade, so it isn't covered by the version check above — nothing on startup notices a
+model you changed at runtime. What happens next depends on whether the new model
+produces a different vector *dimension*:
 
-If a release's notes call out a change to the embedding/indexing format, run a
-reindex once afterward — same command as recovering from stale vectors after a
-restore (**Settings → Reindex search**, or `POST /api/v1/search/reindex`) — to bring
-every existing note's vectors up to the new format.
+- **Same dimension** — silent. Old notes' existing vectors simply won't match what the
+  new model produces, so those notes stop contributing to semantic/hybrid search
+  results, but nothing errors. New notes created or edited after the change are
+  unaffected, since they're always embedded fresh.
+- **Different dimension** — loud. Qdrant rejects both searches and new vector writes
+  against the mismatched collection, so hybrid search starts returning errors
+  immediately, and new/edited notes save fine but silently get no vector (logged as a
+  server-side warning) until you reindex. Reindexing fixes this immediately: it drops
+  and recreates the collection from scratch, so it never hits the mismatch itself.
+
+After changing the embedding model yourself, run a reindex once afterward — same
+command as recovering from stale vectors after a restore (**Settings → Reindex
+search**, or `POST /api/v1/search/reindex`) — to bring every existing note's vectors up
+to the new format.
 
 ## Version policy
 
