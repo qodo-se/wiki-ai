@@ -59,8 +59,16 @@ Standalone:
 
 ```sh
 docker build -t wiki-mcp ./mcp
-docker run -p 8082:8082 -e WIKI_URL=http://host.docker.internal:8081 wiki-mcp
+docker run -p 8082:8082 \
+  --add-host=host.docker.internal:host-gateway \
+  -e WIKI_URL=http://host.docker.internal:8081 \
+  wiki-mcp
 ```
+
+`--add-host` makes `host.docker.internal` resolve on Linux Docker Engine (Docker
+Desktop on Mac/Windows wires it up automatically, but the flag is harmless
+there too) — same reasoning `docker-compose.yml`'s `api` service documents for
+reaching Ollama the same way.
 
 Or as part of the full stack (added as the `mcp` service in the repo's
 `docker-compose.yml`, alongside `api` and `qdrant`):
@@ -77,6 +85,11 @@ publishing its staging api on host port 8082).
 
 ## Point an MCP client at it
 
+The port depends on how you ran it above: **`8082`** standalone (bare `python
+server.py` or the standalone `docker run`), or **`8090`** if you used `docker
+compose up` (or whatever you set `MCP_PORT` to). The examples below assume
+compose's `8090`; swap in `8082` for standalone.
+
 **Claude Code** — add to `.mcp.json` in whatever project you want to use it
 from:
 
@@ -85,14 +98,14 @@ from:
   "mcpServers": {
     "wiki-ai": {
       "type": "http",
-      "url": "http://localhost:8082/mcp"
+      "url": "http://localhost:8090/mcp"
     }
   }
 }
 ```
 
 Any other MCP client that supports a streamable-HTTP (or SSE-compatible)
-remote server works the same way: point it at `http://<host>:8082/mcp`. There
+remote server works the same way: point it at `http://<host>:8090/mcp`. There
 is no authentication on this endpoint — treat it the same as the existing
 `api` service, trusted-local-network only.
 
