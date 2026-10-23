@@ -9,6 +9,13 @@ import pytest
 
 from client import WikiAPIError, WikiClient
 
+# Note ids must be well-formed UUIDs now that the client validates them before
+# building a request path -- these two are arbitrary but valid-shaped
+# placeholders (MISSING_ID doesn't need to "exist" anywhere; the mocked
+# handler decides the response regardless of which valid id is passed).
+VALID_ID = "11111111-1111-1111-1111-111111111111"
+MISSING_ID = "22222222-2222-2222-2222-222222222222"
+
 
 def make_client(handler) -> WikiClient:
     return WikiClient("http://wiki.test", transport=httpx.MockTransport(handler))
@@ -47,10 +54,10 @@ async def test_list_notes_error_surfaces_status_and_body():
 @pytest.mark.asyncio
 async def test_get_note_content_returns_raw_text():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/notes/abc-123"
+        assert request.url.path == f"/api/v1/notes/{VALID_ID}"
         return httpx.Response(200, text="# hello wiki")
 
-    content = await make_client(handler).get_note_content("abc-123")
+    content = await make_client(handler).get_note_content(VALID_ID)
     assert content == "# hello wiki"
 
 
@@ -60,18 +67,18 @@ async def test_get_note_content_404():
         return httpx.Response(404, text="note not found")
 
     with pytest.raises(WikiAPIError) as exc_info:
-        await make_client(handler).get_note_content("missing")
+        await make_client(handler).get_note_content(MISSING_ID)
     assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_get_note_meta_success():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/notes/abc-123/meta"
+        assert request.url.path == f"/api/v1/notes/{VALID_ID}/meta"
         return json_response(
             200,
             {
-                "id": "abc-123",
+                "id": VALID_ID,
                 "title": "Hello",
                 "path": "/docs/hello",
                 "created_at": "2026-01-01T00:00:00Z",
@@ -79,7 +86,7 @@ async def test_get_note_meta_success():
             },
         )
 
-    meta = await make_client(handler).get_note_meta("abc-123")
+    meta = await make_client(handler).get_note_meta(VALID_ID)
     assert meta.title == "Hello"
     assert meta.path == "/docs/hello"
 
@@ -110,12 +117,12 @@ async def test_create_note_error():
 async def test_put_note_sends_content_and_path():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "PUT"
-        assert request.url.path == "/api/v1/notes/abc-123"
+        assert request.url.path == f"/api/v1/notes/{VALID_ID}"
         body = json.loads(request.content)
         assert body == {"content": "updated", "path": "/docs/new"}
         return httpx.Response(200)
 
-    await make_client(handler).put_note("abc-123", "updated", "/docs/new")
+    await make_client(handler).put_note(VALID_ID, "updated", "/docs/new")
 
 
 @pytest.mark.asyncio
@@ -124,7 +131,7 @@ async def test_put_note_404_on_missing_note():
         return httpx.Response(404, text="not found")
 
     with pytest.raises(WikiAPIError) as exc_info:
-        await make_client(handler).put_note("missing", "x", "/p")
+        await make_client(handler).put_note(MISSING_ID, "x", "/p")
     assert exc_info.value.status_code == 404
 
 
@@ -132,10 +139,10 @@ async def test_put_note_404_on_missing_note():
 async def test_delete_note_success():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "DELETE"
-        assert request.url.path == "/api/v1/notes/abc-123"
+        assert request.url.path == f"/api/v1/notes/{VALID_ID}"
         return httpx.Response(204)
 
-    await make_client(handler).delete_note("abc-123")
+    await make_client(handler).delete_note(VALID_ID)
 
 
 @pytest.mark.asyncio
@@ -144,7 +151,7 @@ async def test_delete_note_error():
         return httpx.Response(404, text="not found")
 
     with pytest.raises(WikiAPIError):
-        await make_client(handler).delete_note("missing")
+        await make_client(handler).delete_note(MISSING_ID)
 
 
 @pytest.mark.asyncio
@@ -266,7 +273,7 @@ async def test_long_running_calls_actually_disable_the_timeout():
         seen["timeout"] = request.extensions.get("timeout")
         if request.url.path == "/api/v1/search/reindex":
             return json_response(200, {"total": 0, "embedded": 0, "failed": 0})
-        if request.url.path == "/api/v1/notes/note-1/images":
+        if request.url.path == f"/api/v1/notes/{VALID_ID}/images":
             return json_response(200, {"id": "img-1", "url": "/x"})
         # /api/v1/backup: POST (trigger) needs JSON, GET (download) needs bytes
         if request.method == "POST":
@@ -281,7 +288,7 @@ async def test_long_running_calls_actually_disable_the_timeout():
     await client.create_backup()
     assert seen["timeout"] == {"connect": None, "read": None, "write": None, "pool": None}
 
-    await client.upload_image("note-1", "a.png", b"data")
+    await client.upload_image(VALID_ID, "a.png", b"data")
     assert seen["timeout"] == {"connect": None, "read": None, "write": None, "pool": None}
 
 
@@ -362,12 +369,12 @@ async def test_create_backup_error_on_trigger():
 async def test_upload_image_success():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
-        assert request.url.path == "/api/v1/notes/abc-123/images"
+        assert request.url.path == f"/api/v1/notes/{VALID_ID}/images"
         assert b'name="file"' in request.content
         assert b"photo.jpg" in request.content
         return json_response(200, {"id": "img-1", "url": "/api/v1/images/img-1"})
 
-    img = await make_client(handler).upload_image("abc-123", "photo.jpg", b"fake-bytes")
+    img = await make_client(handler).upload_image(VALID_ID, "photo.jpg", b"fake-bytes")
     assert img.id == "img-1"
     assert img.url == "/api/v1/images/img-1"
 
@@ -378,4 +385,38 @@ async def test_upload_image_error():
         return httpx.Response(404, text="note not found")
 
     with pytest.raises(WikiAPIError):
-        await make_client(handler).upload_image("missing", "photo.jpg", b"x")
+        await make_client(handler).upload_image(MISSING_ID, "photo.jpg", b"x")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "not-a-uuid",
+        "",
+        "11111111-1111-1111-1111-11111111111",  # one char short
+        f"{VALID_ID}?x=1",  # would be read as a query string, not part of the id
+        f"{VALID_ID}#frag",  # would be read as a fragment, not part of the id
+        f"{VALID_ID}/../other",  # would be read as extra path segments
+    ],
+)
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c, bad_id: c.get_note_content(bad_id),
+        lambda c, bad_id: c.get_note_meta(bad_id),
+        lambda c, bad_id: c.put_note(bad_id, "x", "/p"),
+        lambda c, bad_id: c.delete_note(bad_id),
+        lambda c, bad_id: c.upload_image(bad_id, "f.png", b"x"),
+    ],
+)
+async def test_malformed_note_id_rejected_before_any_request(bad_id, call):
+    """A note id with '?', '#', or '/' in it must never reach httpx as a path
+    segment -- those characters would be read as the start of a query string,
+    a fragment, or extra path segments instead of literal id characters."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("must not send a request for a malformed note id")
+
+    with pytest.raises(ValueError, match="not a valid note id"):
+        await call(make_client(handler), bad_id)

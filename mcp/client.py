@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+import re
 
 import httpx
 
@@ -21,6 +22,22 @@ DEFAULT_TIMEOUT = httpx.Timeout(10.0)
 # legitimately still-running request instead of a genuinely hung one -- same
 # reasoning cli/client.go uses its separate, timeout-less backupHTTP client for.
 LONG_TIMEOUT = None
+
+# Mirrors cli/validate.go's uuidPattern/requireUUID: every note id the backend
+# hands out is a UUID, and every note id this client is given ends up
+# interpolated straight into a request path. Rejecting anything else here --
+# before it reaches httpx -- is what stops a stray "?", "#", or "/" in a
+# caller-supplied id from being read as a query string, fragment, or path
+# separator instead of literal id characters.
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _require_valid_note_id(note_id: str) -> str:
+    if not _UUID_RE.match(note_id):
+        raise ValueError(f"{note_id!r} is not a valid note id (expected a UUID)")
+    return note_id
 
 
 class WikiAPIError(Exception):
@@ -63,10 +80,12 @@ class WikiClient:
         return NoteListResponse.model_validate(resp.json())
 
     async def get_note_content(self, note_id: str) -> str:
+        note_id = _require_valid_note_id(note_id)
         resp = await self._request("GET", f"/api/v1/notes/{note_id}")
         return resp.text
 
     async def get_note_meta(self, note_id: str) -> NoteMeta:
+        note_id = _require_valid_note_id(note_id)
         resp = await self._request("GET", f"/api/v1/notes/{note_id}/meta")
         return NoteMeta.model_validate(resp.json())
 
@@ -79,11 +98,13 @@ class WikiClient:
         return resp.json()["id"]
 
     async def put_note(self, note_id: str, content: str, path: str) -> None:
+        note_id = _require_valid_note_id(note_id)
         await self._request(
             "PUT", f"/api/v1/notes/{note_id}", json={"content": content, "path": path}
         )
 
     async def delete_note(self, note_id: str) -> None:
+        note_id = _require_valid_note_id(note_id)
         await self._request("DELETE", f"/api/v1/notes/{note_id}")
 
     async def search(self, query: str, limit: int, offset: int) -> SearchResponse:
@@ -128,6 +149,7 @@ class WikiClient:
         return filename, resp.content
 
     async def upload_image(self, note_id: str, filename: str, content: bytes) -> UploadedImage:
+        note_id = _require_valid_note_id(note_id)
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         resp = await self._request(
             "POST",

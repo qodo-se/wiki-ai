@@ -14,6 +14,14 @@ import pytest
 import server
 from mcp.server.mcpserver.exceptions import ToolError
 
+# Note ids must be well-formed UUIDs now that the client validates them before
+# building a request path (see test_client.py's
+# test_malformed_note_id_rejected_before_any_request for that validation
+# itself). MISSING_ID doesn't need to "exist" anywhere -- the mocked handler
+# decides the response regardless of which valid id is passed.
+VALID_ID = "11111111-1111-1111-1111-111111111111"
+MISSING_ID = "22222222-2222-2222-2222-222222222222"
+
 
 @pytest.mark.asyncio
 async def test_list_notes_success(install_client):
@@ -34,16 +42,41 @@ async def test_list_notes_error_surfaces_as_tool_error(install_client):
 
 
 @pytest.mark.asyncio
+async def test_connection_failure_surfaces_as_tool_error(install_client):
+    """Regression test: _call used to catch only WikiAPIError, which is
+    raised after a response comes back with a bad status -- a connection
+    failure or timeout (no response at all) escaped it as an unhandled httpx
+    exception instead of a clean tool error."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Connection refused")
+
+    install_client(handler)
+    with pytest.raises(ToolError, match="could not reach the wiki API"):
+        await server.list_notes(limit=10, offset=0)
+
+
+@pytest.mark.asyncio
 async def test_get_note_returns_raw_content(install_client):
     install_client(lambda request: httpx.Response(200, text="# hello"))
-    assert await server.get_note(note_id="abc") == "# hello"
+    assert await server.get_note(note_id=VALID_ID) == "# hello"
 
 
 @pytest.mark.asyncio
 async def test_get_note_missing_surfaces_404(install_client):
     install_client(lambda request: httpx.Response(404, text="not found"))
     with pytest.raises(ToolError, match="404"):
-        await server.get_note(note_id="missing")
+        await server.get_note(note_id=MISSING_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_note_malformed_id_surfaces_as_tool_error(install_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("must not send a request for a malformed note id")
+
+    install_client(handler)
+    with pytest.raises(ToolError, match="not a valid note id"):
+        await server.get_note(note_id="not-a-uuid")
 
 
 @pytest.mark.asyncio
@@ -52,7 +85,7 @@ async def test_get_note_meta_success(install_client):
         lambda request: httpx.Response(
             200,
             json={
-                "id": "abc",
+                "id": VALID_ID,
                 "title": "T",
                 "path": "/p",
                 "created_at": "x",
@@ -60,7 +93,7 @@ async def test_get_note_meta_success(install_client):
             },
         )
     )
-    meta = await server.get_note_meta(note_id="abc")
+    meta = await server.get_note_meta(note_id=VALID_ID)
     assert meta.title == "T"
 
 
@@ -88,9 +121,9 @@ async def test_update_note_with_explicit_path_skips_meta_lookup(install_client):
         return httpx.Response(200)
 
     install_client(handler)
-    note_id = await server.update_note(note_id="abc", content="new content", path="/docs/new")
-    assert note_id == "abc"
-    assert calls == ["/api/v1/notes/abc"]  # no /meta lookup needed
+    note_id = await server.update_note(note_id=VALID_ID, content="new content", path="/docs/new")
+    assert note_id == VALID_ID
+    assert calls == [f"/api/v1/notes/{VALID_ID}"]  # no /meta lookup needed
 
 
 @pytest.mark.asyncio
@@ -103,7 +136,7 @@ async def test_update_note_without_path_preserves_existing_path(install_client):
             return httpx.Response(
                 200,
                 json={
-                    "id": "abc",
+                    "id": VALID_ID,
                     "title": "T",
                     "path": "/docs/existing",
                     "created_at": "x",
@@ -115,16 +148,16 @@ async def test_update_note_without_path_preserves_existing_path(install_client):
         return httpx.Response(200)
 
     install_client(handler)
-    await server.update_note(note_id="abc", content="new content")
-    assert ("GET", "/api/v1/notes/abc/meta") in calls
-    assert ("PUT", "/api/v1/notes/abc") in calls
+    await server.update_note(note_id=VALID_ID, content="new content")
+    assert ("GET", f"/api/v1/notes/{VALID_ID}/meta") in calls
+    assert ("PUT", f"/api/v1/notes/{VALID_ID}") in calls
 
 
 @pytest.mark.asyncio
 async def test_update_note_404_on_missing_note(install_client):
     install_client(lambda request: httpx.Response(404, text="not found"))
     with pytest.raises(ToolError, match="404"):
-        await server.update_note(note_id="missing", content="x", path="/p")
+        await server.update_note(note_id=MISSING_ID, content="x", path="/p")
 
 
 @pytest.mark.asyncio
@@ -134,11 +167,11 @@ async def test_delete_note_success(install_client):
         return httpx.Response(204)
 
     install_client(handler)
-    assert await server.delete_note(note_id="abc") == "deleted"
+    assert await server.delete_note(note_id=VALID_ID) == "deleted"
 
 
 @pytest.mark.asyncio
 async def test_delete_note_missing_surfaces_404(install_client):
     install_client(lambda request: httpx.Response(404, text="not found"))
     with pytest.raises(ToolError, match="404"):
-        await server.delete_note(note_id="missing")
+        await server.delete_note(note_id=MISSING_ID)

@@ -28,7 +28,11 @@ services:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8082
     ports:
-      - "${MCP_PORT:-8082}:8082"
+      # Host-side default deliberately differs from the container's own 8082
+      # (set above): scripts/staging.sh defaults to publishing its staging api
+      # on host port 8082 too, so defaulting both to 8082 would collide the
+      # moment both are run at once.
+      - "${MCP_PORT:-8090}:8082"
     depends_on:
       - api
 

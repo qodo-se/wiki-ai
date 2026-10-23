@@ -14,6 +14,7 @@ import base64
 import binascii
 import os
 
+import httpx
 import mcp.types as types
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -44,13 +45,19 @@ client = WikiClient(WIKI_URL)
 
 
 async def _call(coro):
-    """Awaits a client call, turning a WikiAPIError into a ToolError so it
-    surfaces as a clean MCP tool error (is_error=True with the message) rather
-    than an unhandled exception -- mirrors wiki-cli's apiError formatting."""
+    """Awaits a client call, turning every failure a caller can't do anything
+    about into a clean ToolError (is_error=True with a message) instead of an
+    unhandled exception -- mirrors wiki-cli's apiError formatting. Covers:
+    WikiAPIError (the backend responded, just not with success), ValueError
+    (a request was rejected before it was even sent, e.g. a malformed note
+    id), and httpx.HTTPError (no response came back at all -- the backend was
+    unreachable or the request timed out)."""
     try:
         return await coro
-    except WikiAPIError as e:
+    except (WikiAPIError, ValueError) as e:
         raise ToolError(str(e)) from e
+    except httpx.HTTPError as e:
+        raise ToolError(f"could not reach the wiki API at {WIKI_URL}: {e}") from e
 
 
 @mcp_server.tool()
