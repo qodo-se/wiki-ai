@@ -70,7 +70,10 @@ docker compose up -d
 ```
 
 This wires `WIKI_URL` to the `api` service's internal hostname (`wiki`)
-automatically, and exposes the MCP server on `${MCP_PORT:-8082}`.
+automatically, and exposes the MCP server on `${MCP_PORT:-8090}` on the host
+(the container's own internal port is still 8082 — the host-side default is
+different so it doesn't collide with `scripts/staging.sh`, which defaults to
+publishing its staging api on host port 8082).
 
 ## Point an MCP client at it
 
