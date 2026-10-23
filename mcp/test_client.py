@@ -254,6 +254,50 @@ async def test_set_config_error():
 
 
 @pytest.mark.asyncio
+async def test_long_running_calls_actually_disable_the_timeout():
+    """Regression test: _request used to do `kwargs.pop("timeout", None) or
+    DEFAULT_TIMEOUT`, which silently discarded an explicit timeout=None (falsy)
+    and reimposed the 10s default -- defeating reindex/backup/upload_image's
+    LONG_TIMEOUT entirely. Assert the timeout actually reaching the transport
+    is None (no timeout), not DEFAULT_TIMEOUT, for each long-running call."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["timeout"] = request.extensions.get("timeout")
+        if request.url.path == "/api/v1/search/reindex":
+            return json_response(200, {"total": 0, "embedded": 0, "failed": 0})
+        if request.url.path == "/api/v1/notes/note-1/images":
+            return json_response(200, {"id": "img-1", "url": "/x"})
+        # /api/v1/backup: POST (trigger) needs JSON, GET (download) needs bytes
+        if request.method == "POST":
+            return json_response(200, {"filename": "x.zip", "size": 1})
+        return httpx.Response(200, content=b"x")
+
+    client = make_client(handler)
+
+    await client.reindex()
+    assert seen["timeout"] == {"connect": None, "read": None, "write": None, "pool": None}
+
+    await client.create_backup()
+    assert seen["timeout"] == {"connect": None, "read": None, "write": None, "pool": None}
+
+    await client.upload_image("note-1", "a.png", b"data")
+    assert seen["timeout"] == {"connect": None, "read": None, "write": None, "pool": None}
+
+
+@pytest.mark.asyncio
+async def test_short_calls_keep_the_default_timeout():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["timeout"] = request.extensions.get("timeout")
+        return json_response(200, {"items": [], "total": 0, "limit": 10, "offset": 0})
+
+    await make_client(handler).list_notes(10, 0)
+    assert seen["timeout"] == {"connect": 10.0, "read": 10.0, "write": 10.0, "pool": 10.0}
+
+
+@pytest.mark.asyncio
 async def test_reindex_success():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
