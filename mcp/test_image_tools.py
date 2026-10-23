@@ -35,3 +35,11 @@ async def test_upload_image_missing_note_surfaces_404(install_client):
     content_b64 = base64.b64encode(b"x").decode()
     with pytest.raises(ToolError, match="404"):
         await server.upload_image(note_id="missing", filename="x.png", content_base64=content_b64)
+
+
+@pytest.mark.asyncio
+async def test_upload_image_invalid_base64_surfaces_as_tool_error(install_client):
+    # Never reaches the backend -- decoding fails before any request is sent.
+    install_client(lambda request: httpx.Response(500, text="should not be called"))
+    with pytest.raises(ToolError, match="not valid base64"):
+        await server.upload_image(note_id="abc", filename="x.png", content_base64="not-valid-base64!!")

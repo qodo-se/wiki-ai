@@ -43,8 +43,14 @@ class WikiClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        timeout = kwargs.pop("timeout", None) or DEFAULT_TIMEOUT
+    async def _request(
+        self, method: str, path: str, *, timeout: httpx.Timeout | None = DEFAULT_TIMEOUT, **kwargs
+    ) -> httpx.Response:
+        # timeout defaults to DEFAULT_TIMEOUT when the caller doesn't pass it at
+        # all, but an explicit timeout=None (LONG_TIMEOUT) must reach httpx as
+        # None -- `kwargs.pop("timeout", None) or DEFAULT_TIMEOUT` would silently
+        # discard that explicit None (falsy) and reimpose DEFAULT_TIMEOUT, which
+        # is exactly the bug this keyword-only parameter avoids.
         resp = await self._http.request(method, path, timeout=timeout, **kwargs)
         if resp.status_code < 200 or resp.status_code >= 300:
             raise WikiAPIError(resp.status_code, resp.text)

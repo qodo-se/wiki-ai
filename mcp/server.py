@@ -11,6 +11,7 @@ Config (all via environment):
 from __future__ import annotations
 
 import base64
+import binascii
 import os
 
 import mcp.types as types
@@ -176,7 +177,10 @@ async def upload_image(note_id: str, filename: str, content_base64: str) -> Uplo
     ![alt](url). Takes content rather than a local path (unlike wiki-cli's
     upload-image flag) since this server may run in a container with no
     access to the caller's filesystem."""
-    data = base64.b64decode(content_base64)
+    try:
+        data = base64.b64decode(content_base64, validate=True)
+    except binascii.Error as e:
+        raise ToolError(f"content_base64 is not valid base64: {e}") from e
     return await _call(client.upload_image(note_id, filename, data))
 
 
