@@ -18,6 +18,20 @@ services:
     depends_on:
       - qdrant
 
+  mcp:
+    build: ./mcp
+    environment:
+      # "wiki" is the api service's own hostname, set above for exactly this
+      # kind of in-network access (the same hostname Ollama is documented to
+      # reach it by).
+      - WIKI_URL=http://wiki:80
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8082
+    ports:
+      - "${MCP_PORT:-8082}:8082"
+    depends_on:
+      - api
+
   qdrant:
     image: qdrant/qdrant:latest
     volumes:
