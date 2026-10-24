@@ -4,6 +4,7 @@ import os
 import sqlite3
 import sys
 import threading
+import uuid
 import zipfile
 
 DB_PATH = "/data/wiki.db"
@@ -99,6 +100,22 @@ MIGRATIONS: list[tuple[int, list]] = [
         """,
         "CREATE INDEX idx_images_note_id ON images (note_id);",
     ]),
+    # Tracks which snapshot is currently behind manual_backup_path(), so a caller
+    # that triggered a backup can tell whether the file it's about to download is
+    # still the one it asked for, or whether some other trigger (another caller, a
+    # future scheduled job) has since overwritten it. A singleton row (CHECK id=1),
+    # not a history table — the manual backup itself is deliberately a single
+    # always-overwritten file (see MANUAL_BACKUP_FILENAME above), so this only ever
+    # needs to answer "is the file still the one I triggered", not "what were the
+    # last N backups".
+    (3, [
+        """
+        CREATE TABLE manual_backup_state (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            snapshot_id TEXT NOT NULL
+        );
+        """,
+    ]),
 ]
 
 
@@ -171,13 +188,14 @@ def manual_backup_path() -> str:
     return os.path.join(_backup_dir(), MANUAL_BACKUP_FILENAME)
 
 
-def try_create_manual_backup() -> bool:
+def try_create_manual_backup() -> str | None:
     """Overwrites the single manual backup zip (DB snapshot + images) with a
-    fresh one. Returns False immediately, without blocking, if a backup is
-    already in progress — callers should treat that as "try again shortly",
-    not queue behind it."""
+    fresh one, tagging it with a new snapshot id. Returns None immediately,
+    without blocking, if a backup is already in progress — callers should
+    treat that as "try again shortly", not queue behind it. Returns the new
+    snapshot id on success."""
     if not _manual_backup_lock.acquire(blocking=False):
-        return False
+        return None
     try:
         os.makedirs(_backup_dir(), exist_ok=True)
         dest_path = manual_backup_path()
@@ -207,9 +225,28 @@ def try_create_manual_backup() -> bool:
             if os.path.exists(staging_db_path):
                 os.remove(staging_db_path)
         os.rename(staging_path, dest_path)
-        return True
+        snapshot_id = uuid.uuid4().hex
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO manual_backup_state (id, snapshot_id) VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET snapshot_id = excluded.snapshot_id",
+                (snapshot_id,),
+            )
+        return snapshot_id
     finally:
         _manual_backup_lock.release()
+
+
+def current_manual_backup_snapshot_id() -> str | None:
+    """The snapshot id currently behind manual_backup_path(), or None if no
+    manual backup has ever been created. Stored in the database (not process
+    memory) so it survives a backend restart between a caller's trigger and
+    download."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT snapshot_id FROM manual_backup_state WHERE id = 1"
+        ).fetchone()
+    return row[0] if row else None
 
 
 def _backup_before_migration(current_version: int, db_existed: bool) -> None:
