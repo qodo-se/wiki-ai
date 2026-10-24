@@ -43,6 +43,18 @@ def test_create_backup_returns_filename_and_size(client):
     assert body["size"] > 0
 
 
+def test_create_backup_returns_a_snapshot_id(client):
+    res = client.post("/api/v1/backup")
+    assert res.status_code == 200
+    assert res.json()["snapshot_id"]
+
+
+def test_each_create_returns_a_different_snapshot_id(client):
+    first = client.post("/api/v1/backup").json()["snapshot_id"]
+    second = client.post("/api/v1/backup").json()["snapshot_id"]
+    assert first != second
+
+
 def test_create_then_download_round_trips_a_real_snapshot(client):
     client.post("/api/v1/notes", json={"content": "hello backup"})
     assert client.post("/api/v1/backup").status_code == 200
@@ -77,6 +89,51 @@ def test_backup_zip_includes_note_images(client):
 
     with zipfile.ZipFile(io.BytesIO(download_res.content)) as zf:
         assert zf.read(f"images/{image_id}.png") == b"fake-png-bytes"
+
+
+def test_download_with_matching_snapshot_id_succeeds(client):
+    client.post("/api/v1/notes", json={"content": "hello backup"})
+    snapshot_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    res = client.get("/api/v1/backup", params={"snapshot_id": snapshot_id})
+    assert res.status_code == 200
+    assert "hello backup" in _notes_in(res)
+
+
+def test_download_with_stale_snapshot_id_is_rejected_not_silently_served(client):
+    # Backup A, then backup B overwrites the single file — downloading with
+    # A's id must not silently hand back B's content.
+    client.post("/api/v1/notes", json={"content": "first"})
+    stale_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    client.post("/api/v1/notes", json={"content": "second"})
+    client.post("/api/v1/backup")
+
+    res = client.get("/api/v1/backup", params={"snapshot_id": stale_id})
+    assert res.status_code == 409
+    assert "superseded" in res.json()["detail"]
+
+
+def test_download_with_unknown_snapshot_id_is_rejected(client):
+    client.post("/api/v1/backup")
+    res = client.get("/api/v1/backup", params={"snapshot_id": "not-a-real-id"})
+    assert res.status_code == 409
+
+
+def test_snapshot_id_is_persisted_to_disk_not_just_process_memory(client):
+    # The whole point of tracking this in the database rather than a process-
+    # global variable is that it survives a backend restart between a
+    # caller's trigger and download. Proving that means reading it back from
+    # the raw on-disk file directly, independent of any Python object this
+    # test's own client happens to still be holding onto.
+    snapshot_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    raw = sqlite3.connect(db.DB_PATH)
+    try:
+        row = raw.execute("SELECT snapshot_id FROM manual_backup_state").fetchone()
+    finally:
+        raw.close()
+    assert row == (snapshot_id,)
 
 
 def test_create_returns_409_while_a_backup_is_already_in_progress(client):
