@@ -277,7 +277,7 @@ async def test_long_running_calls_actually_disable_the_timeout():
             return json_response(200, {"id": "img-1", "url": "/x"})
         # /api/v1/backup: POST (trigger) needs JSON, GET (download) needs bytes
         if request.method == "POST":
-            return json_response(200, {"filename": "x.zip", "size": 1})
+            return json_response(200, {"filename": "x.zip", "size": 1, "snapshot_id": "snap-x"})
         return httpx.Response(200, content=b"x")
 
     client = make_client(handler)
@@ -330,9 +330,11 @@ async def test_create_backup_triggers_then_downloads():
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.method, request.url.path))
+        calls.append((request.method, request.url.path, dict(request.url.params)))
         if request.method == "POST":
-            return json_response(200, {"filename": "manual-backup.zip", "size": 3})
+            return json_response(
+                200, {"filename": "manual-backup.zip", "size": 3, "snapshot_id": "snap-1"}
+            )
         return httpx.Response(
             200,
             content=b"PK\x03\x04",
@@ -340,7 +342,10 @@ async def test_create_backup_triggers_then_downloads():
         )
 
     filename, data = await make_client(handler).create_backup()
-    assert calls == [("POST", "/api/v1/backup"), ("GET", "/api/v1/backup")]
+    assert calls == [
+        ("POST", "/api/v1/backup", {}),
+        ("GET", "/api/v1/backup", {"snapshot_id": "snap-1"}),
+    ]
     assert filename == "manual-backup.zip"
     assert data == b"PK\x03\x04"
 
@@ -349,7 +354,7 @@ async def test_create_backup_triggers_then_downloads():
 async def test_create_backup_falls_back_to_default_filename():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
-            return httpx.Response(200)
+            return httpx.Response(200, json={"filename": "x.zip", "size": 1, "snapshot_id": "snap-1"})
         return httpx.Response(200, content=b"PK\x03\x04")
 
     filename, data = await make_client(handler).create_backup()
@@ -360,6 +365,21 @@ async def test_create_backup_falls_back_to_default_filename():
 async def test_create_backup_error_on_trigger():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="disk full")
+
+    with pytest.raises(WikiAPIError):
+        await make_client(handler).create_backup()
+
+
+@pytest.mark.asyncio
+async def test_create_backup_error_when_download_rejects_stale_snapshot():
+    # The server detects that some other trigger overwrote the file since
+    # this one fired, and responds 409 instead of serving the wrong snapshot.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return json_response(
+                200, {"filename": "manual-backup.zip", "size": 3, "snapshot_id": "snap-1"}
+            )
+        return httpx.Response(409, text="this backup has been superseded by a newer one")
 
     with pytest.raises(WikiAPIError):
         await make_client(handler).create_backup()
