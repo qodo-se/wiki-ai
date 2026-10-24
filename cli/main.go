@@ -323,10 +323,11 @@ func runBackup(args []string) {
 	}
 
 	c := newClient(url)
-	if _, err := c.createBackup(); err != nil {
+	meta, err := c.createBackup()
+	if err != nil {
 		fail(err)
 	}
-	saved, err := c.downloadBackup(outPath)
+	saved, err := c.downloadBackup(outPath, meta.SnapshotID)
 	if err != nil {
 		fail(err)
 	}

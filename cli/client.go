@@ -294,8 +294,9 @@ func (c *client) search(query string, limit, offset int) (*searchResponse, error
 }
 
 type backupMeta struct {
-	Filename string `json:"filename"`
-	Size     int64  `json:"size"`
+	Filename   string `json:"filename"`
+	Size       int64  `json:"size"`
+	SnapshotID string `json:"snapshot_id"`
 }
 
 // createBackup triggers the server to overwrite its single backup file with a
@@ -319,8 +320,19 @@ func (c *client) createBackup() (*backupMeta, error) {
 // derived from the response's Content-Disposition header. This bypasses do()
 // rather than extending it, since do() always reads the whole body into memory
 // as a JSON response — a backup file should stream straight to disk instead.
-func (c *client) downloadBackup(destPath string) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/api/v1/backup", nil)
+//
+// snapshotID, when non-empty, is sent as the ?snapshot_id= query param so the
+// server can reject the download with a clear error (via apiError, same as
+// any other non-2xx response) if some other trigger has overwritten the
+// single backup file since this snapshot was created — instead of silently
+// handing back a different backup than the one runBackup just asked for. An
+// empty snapshotID preserves the old behavior: whatever's currently on disk.
+func (c *client) downloadBackup(destPath, snapshotID string) (string, error) {
+	reqURL := c.baseURL + "/api/v1/backup"
+	if snapshotID != "" {
+		reqURL += "?" + url.Values{"snapshot_id": {snapshotID}}.Encode()
+	}
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		return "", err
 	}
