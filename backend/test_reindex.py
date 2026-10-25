@@ -128,6 +128,23 @@ def test_reindex_proceeds_when_every_note_is_blank(monkeypatch):
     assert result == {"total": 2, "embedded": 2, "failed": 0}
 
 
+def test_reindex_logs_progress_through_both_phases(monkeypatch, capsys):
+    _insert_note("n1", "hello")
+    _insert_note("n2", "world")
+
+    monkeypatch.setattr(reindex, "delete_collection", lambda: None)
+    monkeypatch.setattr(reindex, "embed_text", lambda content: [0.1])
+    monkeypatch.setattr(reindex, "upsert_vectors", lambda points: None)
+
+    reindex.reindex_notes()
+
+    err = capsys.readouterr().err
+    assert "reindex: embedded 1 of 2 notes" in err
+    assert "reindex: embedded 2 of 2 notes" in err
+    assert "reindex: indexed 1 of 2 notes" in err
+    assert "reindex: indexed 2 of 2 notes" in err
+
+
 def test_reindex_rejects_concurrent_calls():
     reindex._reindex_lock.acquire()
     try:
