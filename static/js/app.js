@@ -351,9 +351,13 @@ async function renderHome() {
             const res = await fetch('/api/v1/notes/' + encodeURIComponent(id), { method: 'DELETE' });
             if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
             if (mode === 'path') {
-                if (allNotesReqId !== pathReqIdBefore) return; // user already navigated away
-                allNotes = null; // cache is stale now — refetch the full set
-                showAllByPath();
+                // Always drop the cache — it's just a dirty flag, safe regardless
+                // of what else happened meanwhile — but only force an immediate
+                // re-render if nothing else already navigated away in the
+                // interim; whatever the user navigated to will have fetched
+                // fresh data for itself.
+                allNotes = null;
+                if (allNotesReqId === pathReqIdBefore) showAllByPath();
             } else {
                 if (currentReqId !== pageReqIdBefore) return; // user already navigated away
                 loadPage(offset); // reuses the existing clamp-back-a-page logic
