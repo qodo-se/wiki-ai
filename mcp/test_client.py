@@ -371,6 +371,28 @@ async def test_create_backup_error_on_trigger():
 
 
 @pytest.mark.asyncio
+async def test_create_backup_tolerates_a_backend_without_snapshot_id():
+    # An older/mismatched backend predating snapshot_id still returns 200
+    # with just filename/size -- this must fall back to downloading without
+    # the query param (today's "whatever's currently on disk" behavior)
+    # rather than raising a KeyError on the missing field.
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, dict(request.url.params)))
+        if request.method == "POST":
+            return json_response(200, {"filename": "manual-backup.zip", "size": 3})
+        return httpx.Response(200, content=b"PK\x03\x04")
+
+    filename, data = await make_client(handler).create_backup()
+    assert calls == [
+        ("POST", "/api/v1/backup", {}),
+        ("GET", "/api/v1/backup", {}),
+    ]
+    assert data == b"PK\x03\x04"
+
+
+@pytest.mark.asyncio
 async def test_create_backup_error_when_download_rejects_stale_snapshot():
     # The server detects that some other trigger overwrote the file since
     # this one fired, and responds 409 instead of serving the wrong snapshot.

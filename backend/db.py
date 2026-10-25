@@ -188,6 +188,14 @@ def manual_backup_path() -> str:
     return os.path.join(_backup_dir(), MANUAL_BACKUP_FILENAME)
 
 
+class ManualBackupNotFound(Exception):
+    """No manual backup has ever been created."""
+
+
+class ManualBackupSuperseded(Exception):
+    """The requested snapshot id no longer matches the current backup."""
+
+
 def try_create_manual_backup() -> str | None:
     """Overwrites the single manual backup zip (DB snapshot + images) with a
     fresh one, tagging it with a new snapshot id. Returns None immediately,
@@ -224,14 +232,22 @@ def try_create_manual_backup() -> str | None:
             source.close()
             if os.path.exists(staging_db_path):
                 os.remove(staging_db_path)
-        os.rename(staging_path, dest_path)
+        # Commit the new id *before* publishing the file under it. If the DB
+        # write fails, the old file/id pair is untouched and stays fully
+        # valid — the alternative order (rename first) would leave the
+        # previous id "validating" a file it no longer actually describes.
         snapshot_id = uuid.uuid4().hex
-        with connect() as conn:
-            conn.execute(
-                "INSERT INTO manual_backup_state (id, snapshot_id) VALUES (1, ?) "
-                "ON CONFLICT(id) DO UPDATE SET snapshot_id = excluded.snapshot_id",
-                (snapshot_id,),
-            )
+        try:
+            with connect() as conn:
+                conn.execute(
+                    "INSERT INTO manual_backup_state (id, snapshot_id) VALUES (1, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET snapshot_id = excluded.snapshot_id",
+                    (snapshot_id,),
+                )
+        except Exception:
+            os.remove(staging_path)
+            raise
+        os.rename(staging_path, dest_path)
         return snapshot_id
     finally:
         _manual_backup_lock.release()
@@ -247,6 +263,31 @@ def current_manual_backup_snapshot_id() -> str | None:
             "SELECT snapshot_id FROM manual_backup_state WHERE id = 1"
         ).fetchone()
     return row[0] if row else None
+
+
+def read_manual_backup(snapshot_id: str | None) -> bytes:
+    """Reads the current manual backup's bytes, checked against snapshot_id
+    (when given) and read while holding the same lock try_create_manual_backup
+    uses — not just a point-in-time ID comparison followed by a separate,
+    later file read. Validating the ID and reading the file as two
+    independent steps leaves a window where a concurrent backup can replace
+    the file in between, so a request that passed validation would still end
+    up serving the new content under the old id's authority. Holding the lock
+    across both steps makes that impossible: a creation in progress either
+    hasn't started (old file/id still current) or has fully completed
+    (new file/id both current) by the time this can acquire it.
+
+    Raises ManualBackupNotFound if no backup has ever been created, or
+    ManualBackupSuperseded if snapshot_id no longer matches the current one.
+    """
+    with _manual_backup_lock:
+        path = manual_backup_path()
+        if not os.path.exists(path):
+            raise ManualBackupNotFound()
+        if snapshot_id is not None and snapshot_id != current_manual_backup_snapshot_id():
+            raise ManualBackupSuperseded()
+        with open(path, "rb") as f:
+            return f.read()
 
 
 def _backup_before_migration(current_version: int, db_existed: bool) -> None:

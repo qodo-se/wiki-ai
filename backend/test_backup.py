@@ -1,6 +1,8 @@
 import io
+import os
 import sqlite3
 import tempfile
+import threading
 import zipfile
 
 import pytest
@@ -153,3 +155,88 @@ def test_create_returns_409_while_a_backup_is_already_in_progress(client):
     # Confirms the lock is actually released afterward, not just that the
     # busy response looks right.
     assert client.post("/api/v1/backup").status_code == 200
+
+
+def test_download_blocks_while_a_create_holds_the_backup_lock(client):
+    # read_manual_backup() must share try_create_manual_backup()'s lock, not
+    # just compare the id first and read the file later — otherwise a create
+    # completing in that gap could publish a new file under a new id between
+    # this download's id check and its actual read, serving the new bytes
+    # while believing it validated the old id. Proven here by holding the
+    # lock directly and confirming a download genuinely blocks on it (doesn't
+    # race past it) rather than by trying to win a real, flaky thread race.
+    client.post("/api/v1/backup")
+    db._manual_backup_lock.acquire()
+    try:
+        result = {}
+
+        def attempt():
+            result["bytes"] = db.read_manual_backup(None)
+
+        t = threading.Thread(target=attempt)
+        t.start()
+        t.join(timeout=0.2)
+        assert t.is_alive(), "read_manual_backup returned without waiting for the lock"
+    finally:
+        db._manual_backup_lock.release()
+    t.join(timeout=2)
+    assert "bytes" in result
+
+
+def test_create_is_blocked_while_a_download_holds_the_backup_lock(client):
+    # The same guarantee in the other direction: an in-progress download must
+    # also block a concurrent create from starting, not just vice versa.
+    client.post("/api/v1/backup")
+    db._manual_backup_lock.acquire()  # simulates a download mid-read_manual_backup
+    try:
+        res = client.post("/api/v1/backup")
+        assert res.status_code == 409
+    finally:
+        db._manual_backup_lock.release()
+
+
+def test_failed_id_commit_leaves_the_previous_backup_fully_valid(client, monkeypatch):
+    # The id is committed to the database *before* the new file is published
+    # (renamed into place) specifically so a failure writing that id can't
+    # leave the previous id "validating" a file it no longer describes. Force
+    # that failure and confirm the original backup is untouched and still
+    # downloadable under its own id.
+    client.post("/api/v1/notes", json={"content": "first"})
+    first_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    client.post("/api/v1/notes", json={"content": "second"})
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("simulated failure")
+
+    # A scoped context, not a bare monkeypatch.setattr()+monkeypatch.undo():
+    # the shared `monkeypatch` fixture also owns the `temp_db` fixture's own
+    # patch of db.DB_PATH, so a manual .undo() here would revert that too —
+    # silently repointing manual_backup_path() elsewhere for the rest of the
+    # test and making every assertion below meaningless.
+    with monkeypatch.context() as m:
+        m.setattr(db, "connect", boom)
+        with pytest.raises(sqlite3.OperationalError):
+            db.try_create_manual_backup()
+
+    # No orphaned staging file left behind by the failed attempt.
+    assert not os.path.exists(db.manual_backup_path() + ".tmp")
+
+    download = client.get("/api/v1/backup", params={"snapshot_id": first_id})
+    assert download.status_code == 200
+    assert _notes_in(download) == {"first"}
+
+    # The lock must also have been released despite the failure, so a normal
+    # retry succeeds.
+    assert client.post("/api/v1/backup").status_code == 200
+
+
+def test_mismatched_backend_response_does_not_break_a_plain_download(client):
+    # Mirrors what an older/mismatched backend predating snapshot_id looks
+    # like from a caller that omits the query param entirely — a bare GET
+    # must still work exactly as it did before this feature existed.
+    client.post("/api/v1/notes", json={"content": "hello backup"})
+    client.post("/api/v1/backup")
+    res = client.get("/api/v1/backup")
+    assert res.status_code == 200
+    assert "hello backup" in _notes_in(res)

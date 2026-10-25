@@ -149,11 +149,16 @@ class WikiClient:
     # different snapshot than the one this call just triggered.
     async def create_backup(self) -> tuple[str, bytes]:
         trigger = await self._request("POST", "/api/v1/backup", timeout=LONG_TIMEOUT)
-        snapshot_id = trigger.json()["snapshot_id"]
+        # .get(), not [...]: an older/mismatched backend predating snapshot_id
+        # still returns 200 with just filename/size, and downloading without
+        # the param falls back to today's "whatever's currently on disk"
+        # behavior rather than raising on the missing key.
+        snapshot_id = trigger.json().get("snapshot_id")
+        params = {"snapshot_id": snapshot_id} if snapshot_id else None
         resp = await self._request(
             "GET",
             "/api/v1/backup",
-            params={"snapshot_id": snapshot_id},
+            params=params,
             timeout=LONG_TIMEOUT,
         )
         filename = (
