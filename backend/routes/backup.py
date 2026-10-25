@@ -1,11 +1,12 @@
 import os
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Response
 
 from db import (
-    current_manual_backup_snapshot_id,
+    ManualBackupNotFound,
+    ManualBackupSuperseded,
     manual_backup_path,
+    read_manual_backup,
     try_create_manual_backup,
 )
 
@@ -27,10 +28,11 @@ def create_backup():
 
 @router.get("")
 def download_backup(snapshot_id: str | None = None):
-    path = manual_backup_path()
-    if not os.path.exists(path):
+    try:
+        data = read_manual_backup(snapshot_id)
+    except ManualBackupNotFound:
         raise HTTPException(status_code=404, detail="no backup has been created yet")
-    if snapshot_id is not None and snapshot_id != current_manual_backup_snapshot_id():
+    except ManualBackupSuperseded:
         # A newer trigger (another caller, a future scheduled job) has
         # overwritten the file since the caller's own trigger — serving it
         # anyway would silently hand them a different snapshot than the one
@@ -40,11 +42,18 @@ def download_backup(snapshot_id: str | None = None):
             status_code=409,
             detail="this backup has been superseded by a newer one — trigger a new backup and download that one instead",
         )
-    return FileResponse(
-        path,
+    # A plain Response over already-read bytes, not FileResponse(path): the
+    # id check above and this response both happen while read_manual_backup
+    # holds the backup lock, so by the time we get here the bytes already
+    # match the validated id — a lazily-streamed FileResponse would instead
+    # reopen the (possibly since-replaced) path after the lock was released.
+    return Response(
+        content=data,
         media_type="application/zip",
-        filename=os.path.basename(path),
-        # A backup is mutable/regenerable — overwritten by the next POST — so
-        # never let a client or intermediary cache it.
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Content-Disposition": f'attachment; filename="{os.path.basename(manual_backup_path())}"',
+            # A backup is mutable/regenerable — overwritten by the next POST —
+            # so never let a client or intermediary cache it.
+            "Cache-Control": "no-store",
+        },
     )
