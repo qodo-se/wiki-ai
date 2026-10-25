@@ -66,9 +66,13 @@ function getQueryParam(name) {
 
 // Shared by home pagination and search pagination — an invalid, missing, or
 // out-of-range `page` value is silently treated as page 1 rather than erroring.
+// Capped well below Number.MAX_SAFE_INTEGER so page * PAGE_SIZE can't overflow
+// SQLite's signed 64-bit OFFSET binding (a crafted huge /?page=... would
+// otherwise 500 instead of just loading an empty page).
+const MAX_PAGE_PARAM = 1_000_000_000;
 function parsePageParam() {
     const n = parseInt(getQueryParam('page'), 10);
-    return Number.isInteger(n) && n >= 1 ? n : 1;
+    return Number.isInteger(n) && n >= 1 && n <= MAX_PAGE_PARAM ? n : 1;
 }
 
 // Merges `updates` (key -> { value, omit }) into the current URL's query
@@ -88,6 +92,23 @@ function updateQuery(updates) {
     }
     const qs = params.toString();
     window.history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : ''));
+}
+
+// Used by the note page's Delete handler to decide whether history.back() has
+// somewhere same-origin to land on. Two checks, both needed:
+//  - Parses document.referrer as a URL and compares .origin (not a string
+//    prefix — "https://wiki.example.com.evil.com" would otherwise pass a
+//    naive startsWith() check against "https://wiki.example.com").
+//  - window.history.length > 1 — a same-origin referrer header is present
+//    even when a note link was opened in a brand-new tab (e.g. middle-click),
+//    but that tab's own history has nothing before this page to go back to.
+function canReturnViaHistory() {
+    if (window.history.length <= 1) return false;
+    try {
+        return new URL(document.referrer).origin === window.location.origin;
+    } catch {
+        return false;
+    }
 }
 
 const PAGE_SIZE = 10;
@@ -320,13 +341,21 @@ async function renderHome() {
         btn.disabled = true;
         const originalIcon = btn.innerHTML;
         btn.innerHTML = `<span class="${CLS.spinner}"></span>`;
+        // Snapshot both request counters so that, if the user navigates (Next/Prev,
+        // or switches By Title/By Path) while this DELETE is still in flight, this
+        // handler's own refresh below doesn't bump currentReqId/allNotesReqId again
+        // afterward and stomp on — and discard — a newer, already-in-flight response.
+        const pageReqIdBefore = currentReqId;
+        const pathReqIdBefore = allNotesReqId;
         try {
             const res = await fetch('/api/v1/notes/' + encodeURIComponent(id), { method: 'DELETE' });
             if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
             if (mode === 'path') {
+                if (allNotesReqId !== pathReqIdBefore) return; // user already navigated away
                 allNotes = null; // cache is stale now — refetch the full set
                 showAllByPath();
             } else {
+                if (currentReqId !== pageReqIdBefore) return; // user already navigated away
                 loadPage(offset); // reuses the existing clamp-back-a-page logic
             }
         } catch (err) {
@@ -453,7 +482,7 @@ async function renderNote(noteId) {
             // search at its query/page/mode) rather than always bouncing to the
             // default home view — that prior URL is kept live via replaceState,
             // so a plain same-origin back-navigation already lands on it.
-            if (document.referrer.startsWith(window.location.origin)) {
+            if (canReturnViaHistory()) {
                 window.history.back();
             } else {
                 window.location.href = '/';
@@ -531,11 +560,24 @@ async function renderSearch() {
 
     async function runSearch(q, nextOffset) {
         if (!q.trim()) {
+            // Invalidates any older in-flight request too — otherwise a response
+            // for a query the user already cleared could land afterward and
+            // silently re-populate both the results and the URL with it.
+            ++currentReqId;
             results.innerHTML = `<li class="${CLS.notice}">Type to search your notes.</li>`;
             pageInfo.textContent = '';
             prevBtn.disabled = true;
             nextBtn.disabled = true;
-            window.history.replaceState(null, '', window.location.pathname); // back to bare /search
+            if (getQueryParam('q')) {
+                // There was a real query in the URL and the user cleared it —
+                // drop everything, back to bare /search.
+                window.history.replaceState(null, '', window.location.pathname);
+            } else {
+                // Nothing was ever searched yet (e.g. toggling Hybrid before
+                // typing anything) — still reflect the mode they explicitly
+                // chose instead of silently discarding it.
+                updateQuery({ mode: { value: mode, omit: 'keyword' } });
+            }
             return;
         }
         const reqId = ++currentReqId;
@@ -605,6 +647,13 @@ async function renderSearch() {
             pageInfo.textContent = '';
             prevBtn.disabled = true;
             nextBtn.disabled = true;
+            // Still reflect the query/mode that was actually attempted — not
+            // the page, since no valid page was reached.
+            updateQuery({
+                q: { value: q },
+                page: { value: 1, omit: 1 },
+                mode: { value: mode, omit: 'keyword' },
+            });
         }
     }
 
@@ -807,6 +856,13 @@ route();
 // the browser's bfcache without re-running this script — so without this,
 // a just-deleted note would still visually appear in that restored list
 // until the user manually refreshed. Re-routing re-fetches current data.
+//
+// Deliberately scoped to home/search only: re-routing a bfcache-restored
+// note or settings page would blow away any unsaved markdown/path/field
+// edits sitting in that restored DOM, which bfcache would otherwise have
+// preserved exactly as the user left them.
 window.addEventListener('pageshow', (e) => {
-    if (e.persisted) route();
+    if (!e.persisted) return;
+    const onHomeOrSearch = window.location.pathname === '/' || /^\/search\/?$/.test(window.location.pathname);
+    if (onHomeOrSearch) route();
 });
