@@ -31,11 +31,13 @@ def reindex_notes() -> dict:
         # A blank note has zero chunks, so it "succeeds" vacuously without ever
         # calling embed_text — that must not count toward the abort check below,
         # or one blank note in the wiki would mask every real note failing.
+        total = len(rows)
         note_vectors, failed, attempted = [], 0, 0
-        for note_id, content in rows:
+        for i, (note_id, content) in enumerate(rows, start=1):
             chunks = chunk_content(content)
             if not chunks:
                 note_vectors.append((note_id, []))
+                print(f"reindex: embedded {i} of {total} notes", file=sys.stderr)
                 continue
             attempted += 1
             try:
@@ -43,8 +45,10 @@ def reindex_notes() -> dict:
             except EmbeddingError as e:
                 print(f"warning: failed to embed note {note_id}: {e}", file=sys.stderr)
                 failed += 1
+                print(f"reindex: embedded {i} of {total} notes", file=sys.stderr)
                 continue
             note_vectors.append((note_id, vectors))
+            print(f"reindex: embedded {i} of {total} notes", file=sys.stderr)
 
         if attempted and failed == attempted:
             raise EmbeddingError(
@@ -58,8 +62,9 @@ def reindex_notes() -> dict:
         # would never clear out.
         delete_collection()
 
+        to_index = len(note_vectors)
         embedded = 0
-        for note_id, vectors in note_vectors:
+        for idx, (note_id, vectors) in enumerate(note_vectors, start=1):
             try:
                 upsert_vectors(
                     [
@@ -72,7 +77,8 @@ def reindex_notes() -> dict:
                 failed += 1
             else:
                 embedded += 1
+            print(f"reindex: indexed {idx} of {to_index} notes", file=sys.stderr)
 
-        return {"total": len(rows), "embedded": embedded, "failed": failed}
+        return {"total": total, "embedded": embedded, "failed": failed}
     finally:
         _reindex_lock.release()

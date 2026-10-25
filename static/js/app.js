@@ -34,7 +34,61 @@ const CLS = {
     fieldLabel: 'block text-sm font-medium text-gray-700 mb-1',
     fieldInput: 'block w-full px-3 py-2 text-sm font-mono bg-white border border-gray-300 rounded-md focus:outline-none focus:border-gray-500',
     fieldHelp: 'text-gray-500 text-xs mt-1',
+    spinner: 'inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin align-[-3px]',
+    trashBtn: 'shrink-0 p-1.5 rounded-md text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent',
 };
+
+const TRASH_ICON_SVG = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4" aria-hidden="true">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+    </svg>
+`;
+
+// Swaps a button's label for a spinner + text while an async action is in
+// flight, and restores it afterward — shared by Save/Delete/Reindex/Backup
+// so "something is happening" is visible even when the request resolves in
+// well under a second (the local backend usually does).
+function withSpinner(btn, label) {
+    btn.disabled = true;
+    btn.dataset.originalLabel = btn.textContent;
+    btn.innerHTML = `<span class="${CLS.spinner} mr-2"></span>${escapeHtml(label)}`;
+}
+
+function clearSpinner(btn, label) {
+    btn.disabled = false;
+    btn.textContent = label !== undefined ? label : btn.dataset.originalLabel;
+}
+
+function getQueryParam(name) {
+    return new URLSearchParams(window.location.search).get(name);
+}
+
+// Shared by home pagination and search pagination — an invalid, missing, or
+// out-of-range `page` value is silently treated as page 1 rather than erroring.
+function parsePageParam() {
+    const n = parseInt(getQueryParam('page'), 10);
+    return Number.isInteger(n) && n >= 1 ? n : 1;
+}
+
+// Merges `updates` (key -> { value, omit }) into the current URL's query
+// string via replaceState — never pushState, so the address bar always
+// reflects the latest page/query/mode without piling up a history entry per
+// keystroke or page turn (confirmed with the user). A value equal to its
+// `omit` default is dropped from the URL instead of written, so `/` and
+// `/search?q=foo` stay as clean as they are today.
+function updateQuery(updates) {
+    const params = new URLSearchParams(window.location.search);
+    for (const [key, { value, omit }] of Object.entries(updates)) {
+        if (value === omit || value === null || value === undefined || value === '') {
+            params.delete(key);
+        } else {
+            params.set(key, value);
+        }
+    }
+    const qs = params.toString();
+    window.history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : ''));
+}
 
 const PAGE_SIZE = 10;
 
@@ -63,7 +117,10 @@ function noteItemHtml(n) {
                 <a href="/notes/${encodeURIComponent(n.id)}" class="${CLS.itemLink} block">${escapeHtml(previewFor(n))}</a>
                 <div class="${CLS.pathBadge}">${escapeHtml(n.path || '/')} · ${escapeHtml(n.id)}</div>
             </div>
-            <time class="${CLS.itemTime}">${escapeHtml(formatDate(n.created_at))}</time>
+            <div class="flex items-center gap-2 shrink-0">
+                <time class="${CLS.itemTime}">${escapeHtml(formatDate(n.created_at))}</time>
+                <button type="button" data-delete-id="${escapeHtml(n.id)}" class="${CLS.trashBtn}" aria-label="Delete note" title="Delete note">${TRASH_ICON_SVG}</button>
+            </div>
         </div>
     `;
 }
@@ -137,7 +194,7 @@ async function renderHome() {
     const pageInfo = document.getElementById('page-info');
     let mode = 'title';
     let notes = [];
-    let offset = 0;
+    let offset = (parsePageParam() - 1) * PAGE_SIZE;
     let total = 0;
     let currentReqId = 0;
     // "By Path" groups across every note, not just one page — fetched in full and
@@ -232,6 +289,7 @@ async function renderHome() {
             total = data.total;
             allNotes = null; // the full-set cache used by "By Path" is now stale
             renderNoteList(list, notes, mode);
+            updateQuery({ page: { value: Math.floor(offset / PAGE_SIZE) + 1, omit: 1 } });
 
             const shownFrom = total === 0 ? 0 : offset + 1;
             const shownTo = offset + notes.length;
@@ -252,7 +310,33 @@ async function renderHome() {
     prevBtn.addEventListener('click', () => loadPage(Math.max(0, offset - PAGE_SIZE)));
     nextBtn.addEventListener('click', () => loadPage(offset + PAGE_SIZE));
 
-    await loadPage(0);
+    // Delegated on the list container (not per-row) since rows are replaced
+    // wholesale on every render by renderNoteList's innerHTML assignment.
+    list.addEventListener('click', async (e) => {
+        const btn = e.target.closest('[data-delete-id]');
+        if (!btn) return;
+        if (!confirm('Delete this note? This cannot be undone.')) return;
+        const id = btn.dataset.deleteId;
+        btn.disabled = true;
+        const originalIcon = btn.innerHTML;
+        btn.innerHTML = `<span class="${CLS.spinner}"></span>`;
+        try {
+            const res = await fetch('/api/v1/notes/' + encodeURIComponent(id), { method: 'DELETE' });
+            if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
+            if (mode === 'path') {
+                allNotes = null; // cache is stale now — refetch the full set
+                showAllByPath();
+            } else {
+                loadPage(offset); // reuses the existing clamp-back-a-page logic
+            }
+        } catch (err) {
+            btn.disabled = false;
+            btn.innerHTML = originalIcon;
+            alert('Delete failed: ' + err.message);
+        }
+    });
+
+    await loadPage(offset);
 }
 
 async function renderNote(noteId) {
@@ -336,7 +420,7 @@ async function renderNote(noteId) {
     const deleteBtn = document.getElementById('delete-btn');
 
     saveBtn.addEventListener('click', async () => {
-        saveBtn.disabled = true;
+        withSpinner(saveBtn, 'Saving…');
         deleteBtn.disabled = true;
         try {
             const res = await fetch(apiUrl, {
@@ -348,42 +432,56 @@ async function renderNote(noteId) {
                 })
             });
             if (!res.ok) throw new Error('HTTP ' + res.status);
-            saveBtn.textContent = 'Saved';
+            clearSpinner(saveBtn, 'Saved');
             setTimeout(() => { saveBtn.textContent = 'Save Note'; }, 1200);
         } catch (err) {
+            clearSpinner(saveBtn, 'Save Note');
             alert('Save failed: ' + err.message);
         } finally {
-            saveBtn.disabled = false;
             deleteBtn.disabled = false;
         }
     });
 
     deleteBtn.addEventListener('click', async () => {
         if (!confirm('Delete this note? This cannot be undone.')) return;
+        withSpinner(deleteBtn, 'Deleting…');
         saveBtn.disabled = true;
-        deleteBtn.disabled = true;
         try {
             const res = await fetch(apiUrl, { method: 'DELETE' });
             if (!res.ok && res.status !== 404) throw new Error('HTTP ' + res.status);
-            window.location.href = '/';
+            // Return to wherever the user came from (home at whatever page, or a
+            // search at its query/page/mode) rather than always bouncing to the
+            // default home view — that prior URL is kept live via replaceState,
+            // so a plain same-origin back-navigation already lands on it.
+            if (document.referrer.startsWith(window.location.origin)) {
+                window.history.back();
+            } else {
+                window.location.href = '/';
+            }
         } catch (err) {
+            clearSpinner(deleteBtn, 'Delete');
             saveBtn.disabled = false;
-            deleteBtn.disabled = false;
             alert('Delete failed: ' + err.message);
         }
     });
 }
 
 async function renderSearch() {
+    // Restore whatever search was last reflected in the URL (direct nav,
+    // reload, or a shared link) instead of always starting blank.
+    const initialQuery = getQueryParam('q') || '';
+    const initialMode = getQueryParam('mode') === 'hybrid' ? 'hybrid' : 'keyword';
+    const initialOffset = (parsePageParam() - 1) * 10;
+
     app.innerHTML = `
         <div class="${CLS.headerRow}">
             <h2 class="${CLS.h2}">Search</h2>
         </div>
         <div class="${CLS.viewToggle}">
-            <button id="mode-keyword-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnActive}">Keyword</button>
-            <button id="mode-hybrid-btn" class="${CLS.toggleBtn} ${CLS.toggleBtnInactive}">Hybrid</button>
+            <button id="mode-keyword-btn" class="${CLS.toggleBtn} ${initialMode === 'keyword' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}">Keyword</button>
+            <button id="mode-hybrid-btn" class="${CLS.toggleBtn} ${initialMode === 'hybrid' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}">Hybrid</button>
         </div>
-        <input id="search-input" class="${CLS.searchInput}" type="search" placeholder="Search your notes…" autocomplete="off" autofocus />
+        <input id="search-input" class="${CLS.searchInput}" type="search" placeholder="Search your notes…" autocomplete="off" autofocus value="${escapeHtml(initialQuery)}" />
         <ul id="search-results" class="${CLS.list}">
             <li class="${CLS.notice}">Type to search your notes.</li>
         </ul>
@@ -403,7 +501,7 @@ async function renderSearch() {
     const pageInfo = document.getElementById('search-page-info');
     let timer = null;
     let currentReqId = 0;
-    let mode = 'keyword';
+    let mode = initialMode;
     let offset = 0;
     const PAGE_SIZE = 10;
 
@@ -437,6 +535,7 @@ async function renderSearch() {
             pageInfo.textContent = '';
             prevBtn.disabled = true;
             nextBtn.disabled = true;
+            window.history.replaceState(null, '', window.location.pathname); // back to bare /search
             return;
         }
         const reqId = ++currentReqId;
@@ -468,6 +567,11 @@ async function renderSearch() {
             }
 
             offset = data.offset;
+            updateQuery({
+                q: { value: q },
+                page: { value: Math.floor(offset / PAGE_SIZE) + 1, omit: 1 },
+                mode: { value: mode, omit: 'keyword' },
+            });
             const hits = data.items;
             if (!hits.length) {
                 results.innerHTML = `<li class="${CLS.notice}">No notes match "${escapeHtml(q)}".</li>`;
@@ -520,6 +624,8 @@ async function renderSearch() {
         clearTimeout(timer);
         timer = setTimeout(() => runSearch(input.value, 0), 200); // a new query starts over from page 1
     });
+
+    if (initialQuery) runSearch(initialQuery, initialOffset);
 }
 
 async function renderSettings() {
@@ -644,7 +750,7 @@ async function renderSettings() {
     const reindexBtn = document.getElementById('reindex-btn');
     const reindexResult = document.getElementById('reindex-result');
     reindexBtn.addEventListener('click', async () => {
-        reindexBtn.disabled = true;
+        withSpinner(reindexBtn, 'Reindexing…');
         reindexResult.textContent = 'Reindexing… dropping and rebuilding the vector index, so it can take a while.';
         try {
             const res = await fetch('/api/v1/search/reindex', { method: 'POST' });
@@ -656,14 +762,14 @@ async function renderSettings() {
         } catch (err) {
             reindexResult.textContent = 'Reindex failed: ' + err.message;
         } finally {
-            reindexBtn.disabled = false;
+            clearSpinner(reindexBtn, 'Reindex search');
         }
     });
 
     const backupBtn = document.getElementById('backup-btn');
     const backupResult = document.getElementById('backup-result');
     backupBtn.addEventListener('click', async () => {
-        backupBtn.disabled = true;
+        withSpinner(backupBtn, 'Creating…');
         backupResult.textContent = 'Creating backup…';
         try {
             const res = await fetch('/api/v1/backup', { method: 'POST' });
@@ -674,7 +780,7 @@ async function renderSettings() {
         } catch (err) {
             backupResult.textContent = 'Backup failed: ' + err.message;
         } finally {
-            backupBtn.disabled = false;
+            clearSpinner(backupBtn, 'Create backup');
         }
     });
 
@@ -695,3 +801,12 @@ function route() {
 }
 
 route();
+
+// A same-origin history.back() (used by the note page's Delete handler to
+// return to the prior home/search context) restores the previous page from
+// the browser's bfcache without re-running this script — so without this,
+// a just-deleted note would still visually appear in that restored list
+// until the user manually refreshed. Re-routing re-fetches current data.
+window.addEventListener('pageshow', (e) => {
+    if (e.persisted) route();
+});
