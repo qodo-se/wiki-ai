@@ -158,10 +158,10 @@ def test_create_returns_409_while_a_backup_is_already_in_progress(client):
 
 
 def test_download_blocks_while_a_create_holds_the_backup_lock(client):
-    # read_manual_backup() must share try_create_manual_backup()'s lock, not
-    # just compare the id first and read the file later — otherwise a create
+    # open_manual_backup() must share try_create_manual_backup()'s lock, not
+    # just compare the id first and open the file later — otherwise a create
     # completing in that gap could publish a new file under a new id between
-    # this download's id check and its actual read, serving the new bytes
+    # this download's id check and its actual open, serving the new bytes
     # while believing it validated the old id. Proven here by holding the
     # lock directly and confirming a download genuinely blocks on it (doesn't
     # race past it) rather than by trying to win a real, flaky thread race.
@@ -171,28 +171,56 @@ def test_download_blocks_while_a_create_holds_the_backup_lock(client):
         result = {}
 
         def attempt():
-            result["bytes"] = db.read_manual_backup(None)
+            result["handle"] = db.open_manual_backup(None)
 
         t = threading.Thread(target=attempt)
         t.start()
         t.join(timeout=0.2)
-        assert t.is_alive(), "read_manual_backup returned without waiting for the lock"
+        assert t.is_alive(), "open_manual_backup returned without waiting for the lock"
     finally:
         db._manual_backup_lock.release()
     t.join(timeout=2)
-    assert "bytes" in result
+    assert "handle" in result
+    result["handle"].close()
 
 
 def test_create_is_blocked_while_a_download_holds_the_backup_lock(client):
     # The same guarantee in the other direction: an in-progress download must
     # also block a concurrent create from starting, not just vice versa.
     client.post("/api/v1/backup")
-    db._manual_backup_lock.acquire()  # simulates a download mid-read_manual_backup
+    db._manual_backup_lock.acquire()  # simulates a download mid-open_manual_backup
     try:
         res = client.post("/api/v1/backup")
         assert res.status_code == 409
     finally:
         db._manual_backup_lock.release()
+
+
+def test_download_handle_survives_a_rename_after_the_lock_is_released(client):
+    # open_manual_backup() only holds the lock for the validate-and-open step,
+    # not the whole download -- relying on POSIX semantics where replacing a
+    # path's directory entry doesn't change what an already-open descriptor
+    # reads. Prove that holds: open a handle, then let a real create() happen
+    # (replacing the file), and confirm the already-open handle still reads
+    # the OLD content, not the new one.
+    client.post("/api/v1/notes", json={"content": "first"})
+    client.post("/api/v1/backup")
+
+    handle = db.open_manual_backup(None)
+    try:
+        client.post("/api/v1/notes", json={"content": "second"})
+        client.post("/api/v1/backup")  # overwrites manual_backup_path() for real
+
+        with zipfile.ZipFile(io.BytesIO(handle.read())) as zf:
+            db_bytes = zf.read("wiki.db")
+    finally:
+        handle.close()
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+        f.write(db_bytes)
+        f.flush()
+        conn = sqlite3.connect(f.name)
+        assert {row[0] for row in conn.execute("SELECT content FROM notes")} == {"first"}
 
 
 def test_failed_id_commit_leaves_the_previous_backup_fully_valid(client, monkeypatch):
@@ -228,6 +256,56 @@ def test_failed_id_commit_leaves_the_previous_backup_fully_valid(client, monkeyp
 
     # The lock must also have been released despite the failure, so a normal
     # retry succeeds.
+    assert client.post("/api/v1/backup").status_code == 200
+
+
+def test_failed_rename_rolls_back_the_committed_id(client, monkeypatch):
+    # The inverse failure window: the id commit succeeds but os.rename() then
+    # fails, which would otherwise leave the database pointing at an id that
+    # describes a file that was never actually published -- while the
+    # previous, still-valid file remains on disk under what is now the wrong
+    # id. Force that failure and confirm the id is rolled back to the
+    # previous one, so the untouched old file stays correctly addressable.
+    client.post("/api/v1/notes", json={"content": "first"})
+    first_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    client.post("/api/v1/notes", json={"content": "second"})
+
+    real_rename = os.rename
+
+    def boom(*args, **kwargs):
+        raise OSError("simulated rename failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "rename", boom)
+        with pytest.raises(OSError):
+            db.try_create_manual_backup()
+    assert os.rename is real_rename
+
+    # The old file was never replaced, and the id was rolled back to match it.
+    assert db.current_manual_backup_snapshot_id() == first_id
+    download = client.get("/api/v1/backup", params={"snapshot_id": first_id})
+    assert download.status_code == 200
+    assert _notes_in(download) == {"first"}
+
+    assert client.post("/api/v1/backup").status_code == 200
+
+
+def test_failed_rename_on_the_very_first_backup_clears_the_id(client, monkeypatch):
+    # Same failure, but with no previous backup to roll back to -- the id
+    # must be cleared entirely, not left pointing at a snapshot that was
+    # never published, so a subsequent bare GET correctly reports 404 rather
+    # than a mismatched/missing-file error.
+    def boom(*args, **kwargs):
+        raise OSError("simulated rename failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "rename", boom)
+        with pytest.raises(OSError):
+            db.try_create_manual_backup()
+
+    assert db.current_manual_backup_snapshot_id() is None
+    assert client.get("/api/v1/backup").status_code == 404
     assert client.post("/api/v1/backup").status_code == 200
 
 
