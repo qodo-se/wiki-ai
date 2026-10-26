@@ -197,7 +197,7 @@ func TestCreateBackupParsesFilenameAndSize(t *testing.T) {
 		if r.URL.Path != "/api/v1/backup" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(map[string]any{"filename": "manual-backup.db", "size": 4096})
+		json.NewEncoder(w).Encode(map[string]any{"filename": "manual-backup.db", "size": 4096, "snapshot_id": "abc123"})
 	}))
 	defer srv.Close()
 
@@ -205,7 +205,7 @@ func TestCreateBackupParsesFilenameAndSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createBackup: %v", err)
 	}
-	if meta.Filename != "manual-backup.db" || meta.Size != 4096 {
+	if meta.Filename != "manual-backup.db" || meta.Size != 4096 || meta.SnapshotID != "abc123" {
 		t.Fatalf("unexpected meta: %+v", meta)
 	}
 }
@@ -234,7 +234,7 @@ func TestDownloadBackupSavesToExplicitPath(t *testing.T) {
 
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "out.db")
-	saved, err := newClient(srv.URL).downloadBackup(dest)
+	saved, err := newClient(srv.URL).downloadBackup(dest, "")
 	if err != nil {
 		t.Fatalf("downloadBackup: %v", err)
 	}
@@ -247,6 +247,56 @@ func TestDownloadBackupSavesToExplicitPath(t *testing.T) {
 	}
 	if string(data) != "fake-sqlite-bytes" {
 		t.Fatalf("data = %q", data)
+	}
+}
+
+func TestDownloadBackupSendsSnapshotIDAsQueryParam(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("snapshot_id")
+		w.Write([]byte("bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if _, err := newClient(srv.URL).downloadBackup(filepath.Join(dir, "out.db"), "the-snapshot-id"); err != nil {
+		t.Fatalf("downloadBackup: %v", err)
+	}
+	if gotQuery != "the-snapshot-id" {
+		t.Fatalf("snapshot_id query param = %q, want %q", gotQuery, "the-snapshot-id")
+	}
+}
+
+func TestDownloadBackupOmitsSnapshotIDQueryParamWhenEmpty(t *testing.T) {
+	var sawParam bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sawParam = r.URL.Query()["snapshot_id"]
+		w.Write([]byte("bytes"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if _, err := newClient(srv.URL).downloadBackup(filepath.Join(dir, "out.db"), ""); err != nil {
+		t.Fatalf("downloadBackup: %v", err)
+	}
+	if sawParam {
+		t.Fatal("expected no snapshot_id query param when snapshotID is empty, preserving old behavior")
+	}
+}
+
+func TestDownloadBackupReturnsAPIErrorForStaleSnapshotID(t *testing.T) {
+	// The server (not this client) is what actually detects staleness — this
+	// just confirms the CLI surfaces that 409 as a normal apiError instead of
+	// silently treating it as a successful download.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"detail":"this backup has been superseded by a newer one — trigger a new backup and download that one instead"}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if _, err := newClient(srv.URL).downloadBackup(filepath.Join(dir, "out.db"), "stale-id"); err == nil {
+		t.Fatal("expected an error for a 409 (stale snapshot) response")
 	}
 }
 
@@ -267,7 +317,7 @@ func TestDownloadBackupDerivesFilenameFromContentDisposition(t *testing.T) {
 	}
 	defer os.Chdir(wd)
 
-	saved, err := newClient(srv.URL).downloadBackup("")
+	saved, err := newClient(srv.URL).downloadBackup("", "")
 	if err != nil {
 		t.Fatalf("downloadBackup: %v", err)
 	}
@@ -303,7 +353,7 @@ func TestDownloadBackupOverwritesAnExistingFileOfTheSameAutoDerivedName(t *testi
 		t.Fatal(err)
 	}
 
-	if _, err := newClient(srv.URL).downloadBackup(""); err != nil {
+	if _, err := newClient(srv.URL).downloadBackup("", ""); err != nil {
 		t.Fatalf("downloadBackup: %v", err)
 	}
 	data, err := os.ReadFile("manual-backup.db")
@@ -334,7 +384,7 @@ func TestDownloadBackupStripsPathTraversalFromServerFilename(t *testing.T) {
 	}
 	defer os.Chdir(wd)
 
-	saved, err := newClient(srv.URL).downloadBackup("")
+	saved, err := newClient(srv.URL).downloadBackup("", "")
 	if err != nil {
 		t.Fatalf("downloadBackup: %v", err)
 	}
@@ -361,7 +411,7 @@ func TestDownloadBackupLeavesExistingFileIntactOnFailedCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := newClient(srv.URL).downloadBackup(dest); err == nil {
+	if _, err := newClient(srv.URL).downloadBackup(dest, ""); err == nil {
 		t.Fatal("expected an error from a truncated response body")
 	}
 
@@ -399,7 +449,7 @@ func TestDownloadBackupDoesNotFollowSymlinkAtPredictableStagingName(t *testing.T
 		t.Fatal(err)
 	}
 
-	if _, err := newClient(srv.URL).downloadBackup(dest); err != nil {
+	if _, err := newClient(srv.URL).downloadBackup(dest, ""); err != nil {
 		t.Fatalf("downloadBackup: %v", err)
 	}
 
@@ -419,7 +469,7 @@ func TestDownloadBackupReturnsAPIErrorWhenNoneExists(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newClient(srv.URL).downloadBackup(filepath.Join(t.TempDir(), "out.db")); err == nil {
+	if _, err := newClient(srv.URL).downloadBackup(filepath.Join(t.TempDir(), "out.db"), ""); err == nil {
 		t.Fatal("expected an error for a 404 response")
 	}
 }

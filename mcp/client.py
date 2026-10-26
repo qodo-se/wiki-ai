@@ -139,9 +139,28 @@ class WikiClient:
     # downloads it, combining what the CLI does as two client-side steps
     # (trigger, then download) into one call -- there's no use case for
     # triggering without retrieving, or retrieving without a fresh trigger.
+    #
+    # The trigger's snapshot_id is passed through to the download as a query
+    # param so the server can detect if some other trigger (another MCP call,
+    # the CLI, a future scheduled job) has overwritten the single backup file
+    # in between -- if it has, the server responds 409 (surfaced by _request
+    # as WikiAPIError, then wrapped into a clean ToolError by server.py's
+    # _call(), same as any other failure) instead of silently handing back a
+    # different snapshot than the one this call just triggered.
     async def create_backup(self) -> tuple[str, bytes]:
-        await self._request("POST", "/api/v1/backup", timeout=LONG_TIMEOUT)
-        resp = await self._request("GET", "/api/v1/backup", timeout=LONG_TIMEOUT)
+        trigger = await self._request("POST", "/api/v1/backup", timeout=LONG_TIMEOUT)
+        # .get(), not [...]: an older/mismatched backend predating snapshot_id
+        # still returns 200 with just filename/size, and downloading without
+        # the param falls back to today's "whatever's currently on disk"
+        # behavior rather than raising on the missing key.
+        snapshot_id = trigger.json().get("snapshot_id")
+        params = {"snapshot_id": snapshot_id} if snapshot_id else None
+        resp = await self._request(
+            "GET",
+            "/api/v1/backup",
+            params=params,
+            timeout=LONG_TIMEOUT,
+        )
         filename = (
             _filename_from_content_disposition(resp.headers.get("content-disposition", ""))
             or "wiki-backup.zip"

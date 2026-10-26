@@ -1,6 +1,8 @@
 import io
+import os
 import sqlite3
 import tempfile
+import threading
 import zipfile
 
 import pytest
@@ -43,6 +45,18 @@ def test_create_backup_returns_filename_and_size(client):
     assert body["size"] > 0
 
 
+def test_create_backup_returns_a_snapshot_id(client):
+    res = client.post("/api/v1/backup")
+    assert res.status_code == 200
+    assert res.json()["snapshot_id"]
+
+
+def test_each_create_returns_a_different_snapshot_id(client):
+    first = client.post("/api/v1/backup").json()["snapshot_id"]
+    second = client.post("/api/v1/backup").json()["snapshot_id"]
+    assert first != second
+
+
 def test_create_then_download_round_trips_a_real_snapshot(client):
     client.post("/api/v1/notes", json={"content": "hello backup"})
     assert client.post("/api/v1/backup").status_code == 200
@@ -79,6 +93,51 @@ def test_backup_zip_includes_note_images(client):
         assert zf.read(f"images/{image_id}.png") == b"fake-png-bytes"
 
 
+def test_download_with_matching_snapshot_id_succeeds(client):
+    client.post("/api/v1/notes", json={"content": "hello backup"})
+    snapshot_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    res = client.get("/api/v1/backup", params={"snapshot_id": snapshot_id})
+    assert res.status_code == 200
+    assert "hello backup" in _notes_in(res)
+
+
+def test_download_with_stale_snapshot_id_is_rejected_not_silently_served(client):
+    # Backup A, then backup B overwrites the single file — downloading with
+    # A's id must not silently hand back B's content.
+    client.post("/api/v1/notes", json={"content": "first"})
+    stale_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    client.post("/api/v1/notes", json={"content": "second"})
+    client.post("/api/v1/backup")
+
+    res = client.get("/api/v1/backup", params={"snapshot_id": stale_id})
+    assert res.status_code == 409
+    assert "superseded" in res.json()["detail"]
+
+
+def test_download_with_unknown_snapshot_id_is_rejected(client):
+    client.post("/api/v1/backup")
+    res = client.get("/api/v1/backup", params={"snapshot_id": "not-a-real-id"})
+    assert res.status_code == 409
+
+
+def test_snapshot_id_is_persisted_to_disk_not_just_process_memory(client):
+    # The whole point of tracking this in the database rather than a process-
+    # global variable is that it survives a backend restart between a
+    # caller's trigger and download. Proving that means reading it back from
+    # the raw on-disk file directly, independent of any Python object this
+    # test's own client happens to still be holding onto.
+    snapshot_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    raw = sqlite3.connect(db.DB_PATH)
+    try:
+        row = raw.execute("SELECT snapshot_id FROM manual_backup_state").fetchone()
+    finally:
+        raw.close()
+    assert row == (snapshot_id,)
+
+
 def test_create_returns_409_while_a_backup_is_already_in_progress(client):
     # try_create_manual_backup() uses a non-blocking lock — a request arriving
     # while one is already running must be rejected immediately, not queued
@@ -96,3 +155,166 @@ def test_create_returns_409_while_a_backup_is_already_in_progress(client):
     # Confirms the lock is actually released afterward, not just that the
     # busy response looks right.
     assert client.post("/api/v1/backup").status_code == 200
+
+
+def test_download_blocks_while_a_create_holds_the_backup_lock(client):
+    # open_manual_backup() must share try_create_manual_backup()'s lock, not
+    # just compare the id first and open the file later — otherwise a create
+    # completing in that gap could publish a new file under a new id between
+    # this download's id check and its actual open, serving the new bytes
+    # while believing it validated the old id. Proven here by holding the
+    # lock directly and confirming a download genuinely blocks on it (doesn't
+    # race past it) rather than by trying to win a real, flaky thread race.
+    client.post("/api/v1/backup")
+    db._manual_backup_lock.acquire()
+    try:
+        result = {}
+
+        def attempt():
+            result["handle"] = db.open_manual_backup(None)
+
+        t = threading.Thread(target=attempt)
+        t.start()
+        t.join(timeout=0.2)
+        assert t.is_alive(), "open_manual_backup returned without waiting for the lock"
+    finally:
+        db._manual_backup_lock.release()
+    t.join(timeout=2)
+    assert "handle" in result
+    result["handle"].close()
+
+
+def test_create_is_blocked_while_a_download_holds_the_backup_lock(client):
+    # The same guarantee in the other direction: an in-progress download must
+    # also block a concurrent create from starting, not just vice versa.
+    client.post("/api/v1/backup")
+    db._manual_backup_lock.acquire()  # simulates a download mid-open_manual_backup
+    try:
+        res = client.post("/api/v1/backup")
+        assert res.status_code == 409
+    finally:
+        db._manual_backup_lock.release()
+
+
+def test_download_handle_survives_a_rename_after_the_lock_is_released(client):
+    # open_manual_backup() only holds the lock for the validate-and-open step,
+    # not the whole download -- relying on POSIX semantics where replacing a
+    # path's directory entry doesn't change what an already-open descriptor
+    # reads. Prove that holds: open a handle, then let a real create() happen
+    # (replacing the file), and confirm the already-open handle still reads
+    # the OLD content, not the new one.
+    client.post("/api/v1/notes", json={"content": "first"})
+    client.post("/api/v1/backup")
+
+    handle = db.open_manual_backup(None)
+    try:
+        client.post("/api/v1/notes", json={"content": "second"})
+        client.post("/api/v1/backup")  # overwrites manual_backup_path() for real
+
+        with zipfile.ZipFile(io.BytesIO(handle.read())) as zf:
+            db_bytes = zf.read("wiki.db")
+    finally:
+        handle.close()
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as f:
+        f.write(db_bytes)
+        f.flush()
+        conn = sqlite3.connect(f.name)
+        assert {row[0] for row in conn.execute("SELECT content FROM notes")} == {"first"}
+
+
+def test_failed_id_commit_leaves_the_previous_backup_fully_valid(client, monkeypatch):
+    # The id is committed to the database *before* the new file is published
+    # (renamed into place) specifically so a failure writing that id can't
+    # leave the previous id "validating" a file it no longer describes. Force
+    # that failure and confirm the original backup is untouched and still
+    # downloadable under its own id.
+    client.post("/api/v1/notes", json={"content": "first"})
+    first_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    client.post("/api/v1/notes", json={"content": "second"})
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("simulated failure")
+
+    # A scoped context, not a bare monkeypatch.setattr()+monkeypatch.undo():
+    # the shared `monkeypatch` fixture also owns the `temp_db` fixture's own
+    # patch of db.DB_PATH, so a manual .undo() here would revert that too —
+    # silently repointing manual_backup_path() elsewhere for the rest of the
+    # test and making every assertion below meaningless.
+    with monkeypatch.context() as m:
+        m.setattr(db, "connect", boom)
+        with pytest.raises(sqlite3.OperationalError):
+            db.try_create_manual_backup()
+
+    # No orphaned staging file left behind by the failed attempt.
+    assert not os.path.exists(db.manual_backup_path() + ".tmp")
+
+    download = client.get("/api/v1/backup", params={"snapshot_id": first_id})
+    assert download.status_code == 200
+    assert _notes_in(download) == {"first"}
+
+    # The lock must also have been released despite the failure, so a normal
+    # retry succeeds.
+    assert client.post("/api/v1/backup").status_code == 200
+
+
+def test_failed_rename_rolls_back_the_committed_id(client, monkeypatch):
+    # The inverse failure window: the id commit succeeds but os.rename() then
+    # fails, which would otherwise leave the database pointing at an id that
+    # describes a file that was never actually published -- while the
+    # previous, still-valid file remains on disk under what is now the wrong
+    # id. Force that failure and confirm the id is rolled back to the
+    # previous one, so the untouched old file stays correctly addressable.
+    client.post("/api/v1/notes", json={"content": "first"})
+    first_id = client.post("/api/v1/backup").json()["snapshot_id"]
+
+    client.post("/api/v1/notes", json={"content": "second"})
+
+    real_rename = os.rename
+
+    def boom(*args, **kwargs):
+        raise OSError("simulated rename failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "rename", boom)
+        with pytest.raises(OSError):
+            db.try_create_manual_backup()
+    assert os.rename is real_rename
+
+    # The old file was never replaced, and the id was rolled back to match it.
+    assert db.current_manual_backup_snapshot_id() == first_id
+    download = client.get("/api/v1/backup", params={"snapshot_id": first_id})
+    assert download.status_code == 200
+    assert _notes_in(download) == {"first"}
+
+    assert client.post("/api/v1/backup").status_code == 200
+
+
+def test_failed_rename_on_the_very_first_backup_clears_the_id(client, monkeypatch):
+    # Same failure, but with no previous backup to roll back to -- the id
+    # must be cleared entirely, not left pointing at a snapshot that was
+    # never published, so a subsequent bare GET correctly reports 404 rather
+    # than a mismatched/missing-file error.
+    def boom(*args, **kwargs):
+        raise OSError("simulated rename failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(os, "rename", boom)
+        with pytest.raises(OSError):
+            db.try_create_manual_backup()
+
+    assert db.current_manual_backup_snapshot_id() is None
+    assert client.get("/api/v1/backup").status_code == 404
+    assert client.post("/api/v1/backup").status_code == 200
+
+
+def test_mismatched_backend_response_does_not_break_a_plain_download(client):
+    # Mirrors what an older/mismatched backend predating snapshot_id looks
+    # like from a caller that omits the query param entirely — a bare GET
+    # must still work exactly as it did before this feature existed.
+    client.post("/api/v1/notes", json={"content": "hello backup"})
+    client.post("/api/v1/backup")
+    res = client.get("/api/v1/backup")
+    assert res.status_code == 200
+    assert "hello backup" in _notes_in(res)

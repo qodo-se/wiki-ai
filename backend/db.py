@@ -4,6 +4,7 @@ import os
 import sqlite3
 import sys
 import threading
+import uuid
 import zipfile
 
 DB_PATH = "/data/wiki.db"
@@ -99,6 +100,22 @@ MIGRATIONS: list[tuple[int, list]] = [
         """,
         "CREATE INDEX idx_images_note_id ON images (note_id);",
     ]),
+    # Tracks which snapshot is currently behind manual_backup_path(), so a caller
+    # that triggered a backup can tell whether the file it's about to download is
+    # still the one it asked for, or whether some other trigger (another caller, a
+    # future scheduled job) has since overwritten it. A singleton row (CHECK id=1),
+    # not a history table — the manual backup itself is deliberately a single
+    # always-overwritten file (see MANUAL_BACKUP_FILENAME above), so this only ever
+    # needs to answer "is the file still the one I triggered", not "what were the
+    # last N backups".
+    (3, [
+        """
+        CREATE TABLE manual_backup_state (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            snapshot_id TEXT NOT NULL
+        );
+        """,
+    ]),
 ]
 
 
@@ -171,13 +188,22 @@ def manual_backup_path() -> str:
     return os.path.join(_backup_dir(), MANUAL_BACKUP_FILENAME)
 
 
-def try_create_manual_backup() -> bool:
+class ManualBackupNotFound(Exception):
+    """No manual backup has ever been created."""
+
+
+class ManualBackupSuperseded(Exception):
+    """The requested snapshot id no longer matches the current backup."""
+
+
+def try_create_manual_backup() -> str | None:
     """Overwrites the single manual backup zip (DB snapshot + images) with a
-    fresh one. Returns False immediately, without blocking, if a backup is
-    already in progress — callers should treat that as "try again shortly",
-    not queue behind it."""
+    fresh one, tagging it with a new snapshot id. Returns None immediately,
+    without blocking, if a backup is already in progress — callers should
+    treat that as "try again shortly", not queue behind it. Returns the new
+    snapshot id on success."""
     if not _manual_backup_lock.acquire(blocking=False):
-        return False
+        return None
     try:
         os.makedirs(_backup_dir(), exist_ok=True)
         dest_path = manual_backup_path()
@@ -206,10 +232,90 @@ def try_create_manual_backup() -> bool:
             source.close()
             if os.path.exists(staging_db_path):
                 os.remove(staging_db_path)
-        os.rename(staging_path, dest_path)
-        return True
+        # Commit the new id *before* publishing the file under it. If the DB
+        # write fails, the old file/id pair is untouched and stays fully
+        # valid — the alternative order (rename first) would leave the
+        # previous id "validating" a file it no longer actually describes.
+        # previous_id is read in the same try/except as the write itself
+        # (not before it) so that a failure reading it doesn't skip the
+        # staging-file cleanup below, same as a failure writing it wouldn't.
+        snapshot_id = uuid.uuid4().hex
+        try:
+            with connect() as conn:
+                previous_id_row = conn.execute(
+                    "SELECT snapshot_id FROM manual_backup_state WHERE id = 1"
+                ).fetchone()
+                conn.execute(
+                    "INSERT INTO manual_backup_state (id, snapshot_id) VALUES (1, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET snapshot_id = excluded.snapshot_id",
+                    (snapshot_id,),
+                )
+        except Exception:
+            os.remove(staging_path)
+            raise
+        previous_id = previous_id_row[0] if previous_id_row else None
+        try:
+            os.rename(staging_path, dest_path)
+        except Exception:
+            # The id committed above now describes a file that was never
+            # actually published — restore the previous id (or clear it
+            # entirely, if this was the first backup ever) so the still-valid
+            # old file isn't orphaned under an id it no longer matches.
+            with connect() as conn:
+                if previous_id is not None:
+                    conn.execute(
+                        "UPDATE manual_backup_state SET snapshot_id = ? WHERE id = 1",
+                        (previous_id,),
+                    )
+                else:
+                    conn.execute("DELETE FROM manual_backup_state WHERE id = 1")
+            if os.path.exists(staging_path):
+                os.remove(staging_path)
+            raise
+        return snapshot_id
     finally:
         _manual_backup_lock.release()
+
+
+def current_manual_backup_snapshot_id() -> str | None:
+    """The snapshot id currently behind manual_backup_path(), or None if no
+    manual backup has ever been created. Stored in the database (not process
+    memory) so it survives a backend restart between a caller's trigger and
+    download."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT snapshot_id FROM manual_backup_state WHERE id = 1"
+        ).fetchone()
+    return row[0] if row else None
+
+
+def open_manual_backup(snapshot_id: str | None):
+    """Validates snapshot_id (when given) against the current backup and
+    returns an already-open, read-only file handle for it — not its bytes —
+    so a caller can stream the response instead of buffering the whole ZIP in
+    process memory.
+
+    The validation and the open() both happen while holding the same lock
+    try_create_manual_backup() uses, for the same reason read-then-later-open
+    wouldn't be safe: a concurrent backup completing in between would replace
+    the file, and a request that had just validated against the old id would
+    end up serving the new content under the old id's authority. Once the
+    handle is open, though, the lock can be released immediately — on POSIX,
+    replacing a path's directory entry (what os.rename does) doesn't change
+    what an already-open file descriptor reads, so the lock only needs to
+    cover this brief validate-and-open step, not the whole download.
+
+    Raises ManualBackupNotFound if no backup has ever been created, or
+    ManualBackupSuperseded if snapshot_id no longer matches the current one.
+    The caller is responsible for closing the returned handle.
+    """
+    with _manual_backup_lock:
+        path = manual_backup_path()
+        if not os.path.exists(path):
+            raise ManualBackupNotFound()
+        if snapshot_id is not None and snapshot_id != current_manual_backup_snapshot_id():
+            raise ManualBackupSuperseded()
+        return open(path, "rb")
 
 
 def _backup_before_migration(current_version: int, db_existed: bool) -> None:
