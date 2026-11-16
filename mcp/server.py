@@ -78,8 +78,13 @@ async def list_notes(
     """List notes, most recently created first, paged by limit/offset.
 
     scope is "notes" (the default), "containers", or "all". Each item carries
-    its kind and parent_id, so listing with scope="containers" returns the
-    whole tree skeleton in a single call -- no recursive walk needed."""
+    its kind and parent_id, so scope="containers" gives you the tree skeleton
+    without walking it -- the parent_id values link the containers together.
+
+    This is paged like any other listing: pass a large limit (100 is the
+    maximum per request) and keep requesting with offset until you have
+    `total` items. The default limit is 10, so a single default call shows
+    only the first page of a larger tree."""
     return await _call(client.list_notes(limit, offset, scope))
 
 

@@ -193,7 +193,10 @@ func runList(args []string) {
 		fail(err)
 	}
 	for _, n := range list.Items {
-		fmt.Printf("%s  %-11s %-30s %-20s %s\n", sanitizeForTerminal(n.ID), sanitizeForTerminal(n.Kind), sanitizeForTerminal(n.Title), sanitizeForTerminal(n.Path), n.CreatedAt)
+		// The parent id is printed in full, not abbreviated: reconstructing the
+		// tree from `list --scope containers` means matching it against the ids
+		// in the first column, which a truncated value can't do.
+		fmt.Printf("%s  %-11s %-30s %-20s %s  parent:%s\n", sanitizeForTerminal(n.ID), sanitizeForTerminal(n.Kind), sanitizeForTerminal(n.Title), sanitizeForTerminal(n.Path), n.CreatedAt, formatParent(n.ParentID))
 	}
 
 	if list.Total == 0 {
@@ -362,6 +365,25 @@ func runSearch(args []string) {
 	printSearchPageInfo(resp, *limit)
 }
 
+// parsePositional pulls out the command's <uuid> argument and lets flags sit
+// on either side of it. Go's flag package stops parsing at the first
+// non-flag argument, so a bare fs.Parse(args) would silently drop the flags
+// in `set-parent <uuid> --parent <uuid>` — the form these commands document
+// and the natural one to type. Parsing twice (leading flags, then the
+// remainder after the positional) handles both orders. Returns "" when no
+// positional was given, leaving the usage check to the caller.
+func parsePositional(fs *flag.FlagSet, args []string) string {
+	fs.Parse(args)
+	if fs.NArg() == 0 {
+		return ""
+	}
+	positional := fs.Arg(0)
+	if rest := fs.Args()[1:]; len(rest) > 0 {
+		fs.Parse(rest)
+	}
+	return positional
+}
+
 // addScopeFlag is shared by list/search/search-hybrid so the three never
 // drift on spelling or default. Empty means "don't send one" — the server's
 // own default (notes only) then applies.
@@ -388,15 +410,15 @@ func formatParent(parentID *string) string {
 func runAncestors(args []string) {
 	fs := flag.NewFlagSet("ancestors", flag.ExitOnError)
 	urlFlag := addURLFlag(fs)
-	fs.Parse(args)
+	noteID := parsePositional(fs, args)
 	url := *urlFlag
 
-	if fs.NArg() < 1 {
+	if noteID == "" {
 		fmt.Fprintln(os.Stderr, "usage: wiki-cli ancestors <uuid>")
 		os.Exit(1)
 	}
 
-	resp, err := newClient(url).getNoteAncestors(requireUUID(fs.Arg(0)))
+	resp, err := newClient(url).getNoteAncestors(requireUUID(noteID))
 	if err != nil {
 		fail(err)
 	}
@@ -405,9 +427,19 @@ func runAncestors(args []string) {
 		return
 	}
 	// Root first, indenting one level per step, so the shape of the chain is
-	// visible at a glance rather than having to be reconstructed.
+	// visible at a glance rather than having to be reconstructed. Each
+	// container's body is printed under it — that prose is the whole reason to
+	// walk up, and a bare list of titles would be no more informative than the
+	// path string this feature exists to replace.
 	for i, a := range resp.Items {
-		fmt.Printf("%s%s  %s\n", strings.Repeat("  ", i), sanitizeForTerminal(a.ID), sanitizeForTerminal(a.Title))
+		indent := strings.Repeat("  ", i)
+		fmt.Printf("%s%s  %s\n", indent, sanitizeForTerminal(a.ID), sanitizeForTerminal(a.Title))
+		for _, line := range strings.Split(strings.TrimRight(a.Content, "\n"), "\n") {
+			fmt.Printf("%s  | %s\n", indent, sanitizeForTerminal(line))
+		}
+		if a.ContentTruncated {
+			fmt.Printf("%s  | … (truncated)\n", indent)
+		}
 	}
 }
 
@@ -416,10 +448,10 @@ func runChildren(args []string) {
 	limit := fs.Int("limit", 10, "max number of children to return per page")
 	offset := fs.Int("offset", 0, "number of children to skip (for paging)")
 	urlFlag := addURLFlag(fs)
-	fs.Parse(args)
+	noteID := parsePositional(fs, args)
 	url := *urlFlag
 
-	if fs.NArg() < 1 {
+	if noteID == "" {
 		fmt.Fprintln(os.Stderr, "usage: wiki-cli children <uuid>")
 		os.Exit(1)
 	}
@@ -428,7 +460,7 @@ func runChildren(args []string) {
 		os.Exit(1)
 	}
 
-	resp, err := newClient(url).getNoteChildren(requireUUID(fs.Arg(0)), *limit, *offset)
+	resp, err := newClient(url).getNoteChildren(requireUUID(noteID), *limit, *offset)
 	if err != nil {
 		fail(err)
 	}
@@ -455,10 +487,10 @@ func runSetParent(args []string) {
 	parent := fs.String("parent", "", "uuid of the container to file this note under")
 	clear := fs.Bool("clear", false, "move the note back to the top level")
 	urlFlag := addURLFlag(fs)
-	fs.Parse(args)
+	noteID := parsePositional(fs, args)
 	url := *urlFlag
 
-	if fs.NArg() < 1 {
+	if noteID == "" {
 		fmt.Fprintln(os.Stderr, "usage: wiki-cli set-parent <uuid> (--parent <uuid> | --clear)")
 		os.Exit(1)
 	}
@@ -477,7 +509,7 @@ func runSetParent(args []string) {
 		parentID = &validated
 	}
 
-	if err := newClient(url).setNoteParent(requireUUID(fs.Arg(0)), parentID); err != nil {
+	if err := newClient(url).setNoteParent(requireUUID(noteID), parentID); err != nil {
 		fail(err)
 	}
 	if parentID == nil {

@@ -14,6 +14,7 @@ from db import connect
 from embeddings import EmbeddingError, embed_text
 from paths import normalize_path
 from routes.images import delete_note_images
+from search import _derive_title
 from tree import (
     KIND_CONTAINER,
     InvalidParent,
@@ -76,11 +77,13 @@ PATH_PATTERN = r"^[A-Za-z0-9 _./-]*$"
 
 
 def _has_title_line(content: str) -> bool:
-    # A container's title is derived from its first non-blank line, the same
-    # way search.py derives every note's title. A container with nothing to
-    # derive from would be an unnameable node in the tree, so it's rejected at
-    # the door rather than silently becoming "".
-    return any(line.strip() for line in content.splitlines())
+    # Asks the actual title deriver rather than approximating it with "has a
+    # non-blank line". Content of just "#" clears that lower bar but derives
+    # to "" once the heading marker is stripped, which would save exactly the
+    # unnameable container this check exists to reject.
+    from search import _derive_title
+
+    return bool(_derive_title(content).strip())
 
 
 class NoteBody(BaseModel):
@@ -193,15 +196,23 @@ def list_notes(
         ).fetchone()[0]
         rows = db.execute(
             "SELECT id, title, path, substr(content, 1, 120) AS preview, created_at, "
-            "kind, parent_id "
+            # The same leading slice feeds both the preview and the derived
+            # title below -- a title comes from the first non-blank line, so
+            # 120 characters is always enough and whole contents needn't be
+            # read for a listing.
+            "kind, parent_id, substr(content, 1, 120) "
             f"FROM notes WHERE {scope_predicate} "
             "ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
             (*scope_params, limit, offset),
         ).fetchall()
+    # Falls back to the derived title exactly as search.py does. notes.title
+    # is never written by anything, so without this every list item -- and so
+    # every container in a scope=containers skeleton -- comes back nameless,
+    # while the same row has a title through search, children and ancestors.
     items = [
         NoteSummary(
-            id=r[0], title=r[1], path=r[2], preview=r[3], created_at=r[4],
-            kind=r[5], parent_id=r[6],
+            id=r[0], title=r[1] or _derive_title(r[7]), path=r[2], preview=r[3],
+            created_at=r[4], kind=r[5], parent_id=r[6],
         )
         for r in rows
     ]
@@ -270,6 +281,11 @@ def put_note(uuid: str, body: NoteBody):
 @router.delete("/{uuid}", status_code=204)
 def delete_note(uuid: str):
     with connect() as db:
+        # Same reason set_parent uses it: without the write lock held from the
+        # start, a concurrent move of this container between the read below
+        # and the promotion would re-home its children onto the parent it used
+        # to have rather than the one it had when it was deleted.
+        db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT parent_id FROM notes WHERE id = ?", (uuid,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="note not found")

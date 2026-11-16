@@ -154,7 +154,14 @@ def semantic_search_notes(query: str, limit: int, scope: Scope = Scope.notes) ->
             continue  # a point from before chunking (no note_id payload) — ignore until reindexed
         if note_id not in best_score_by_note or m["score"] > best_score_by_note[note_id]:
             best_score_by_note[note_id] = m["score"]
-    ranked_note_ids = sorted(best_score_by_note, key=lambda nid: best_score_by_note[nid], reverse=True)[:limit]
+    # Ranked in full rather than cut to `limit` here: the scope filter below
+    # runs in SQL, so trimming first would let an out-of-scope container that
+    # outranks a real note consume one of the slots and then vanish, returning
+    # fewer hits than exist -- at limit=1, an empty page with a matching note
+    # sitting just behind it. The list is bounded by the number of distinct
+    # notes among the chunk hits, so ranking all of them is cheap; the cut to
+    # `limit` happens after filtering instead.
+    ranked_note_ids = sorted(best_score_by_note, key=lambda nid: best_score_by_note[nid], reverse=True)
     if not ranked_note_ids:
         return []
 
@@ -188,6 +195,8 @@ def semantic_search_notes(query: str, limit: int, scope: Scope = Scope.notes) ->
                 created_at=created_at,
             )
         )
+        if len(hits) == limit:
+            break
     return hits
 
 

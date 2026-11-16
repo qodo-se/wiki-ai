@@ -40,8 +40,10 @@ each container's prose — that UH-100 was a 2018 college course, say, making
 its notes historical rather than current — which is exactly the context a
 model needs before judging whether a note is relevant or current.
 
-`list_notes(scope="containers")` returns every container with its `parent_id`,
-so the whole tree skeleton arrives in one call with no recursive traversal.
+`list_notes(scope="containers")` returns containers with their `parent_id`, so
+the skeleton comes back without any recursive traversal. It is paged like any
+other listing (default limit 10, maximum 100), so pass a large limit and page
+with offset until you have `total` items.
 
 Two tools deliberately don't take a local filesystem path the way their CLI
 equivalent does, since this server may run in a container with no access to

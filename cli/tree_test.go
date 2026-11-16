@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -285,5 +286,62 @@ func TestSetNoteParentSurfacesARejectedAssignment(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cycle") {
 		t.Errorf("error should carry the server's reason, got %q", err.Error())
+	}
+}
+
+// --- flag parsing around the positional argument ---------------------------
+
+func TestParsePositionalAcceptsFlagsOnEitherSide(t *testing.T) {
+	// Regression: Go's flag package stops parsing at the first non-flag
+	// argument, so `set-parent <uuid> --parent <uuid>` — the form the usage
+	// text and README both document — silently dropped every flag.
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantID     string
+		wantParent string
+	}{
+		{"flags after positional", []string{"note-id", "--parent", "box-id"}, "note-id", "box-id"},
+		{"flags before positional", []string{"--parent", "box-id", "note-id"}, "note-id", "box-id"},
+		{"flags on both sides", []string{"--parent", "box-id", "note-id", "--url", "http://x"}, "note-id", "box-id"},
+		{"no flags at all", []string{"note-id"}, "note-id", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("set-parent", flag.ContinueOnError)
+			parent := fs.String("parent", "", "")
+			fs.String("url", "", "")
+
+			got := parsePositional(fs, tc.args)
+
+			if got != tc.wantID {
+				t.Errorf("positional = %q, want %q", got, tc.wantID)
+			}
+			if *parent != tc.wantParent {
+				t.Errorf("--parent = %q, want %q", *parent, tc.wantParent)
+			}
+		})
+	}
+}
+
+func TestParsePositionalReturnsEmptyWhenNoneGiven(t *testing.T) {
+	fs := flag.NewFlagSet("ancestors", flag.ContinueOnError)
+	fs.String("url", "", "")
+
+	if got := parsePositional(fs, []string{"--url", "http://x"}); got != "" {
+		t.Errorf("positional = %q, want empty so the caller prints usage", got)
+	}
+}
+
+func TestFormatParentDistinguishesTopLevel(t *testing.T) {
+	if got := formatParent(nil); got != "(top level)" {
+		t.Errorf("nil parent = %q", got)
+	}
+	empty := ""
+	if got := formatParent(&empty); got != "(top level)" {
+		t.Errorf("empty parent = %q", got)
+	}
+	id := testParentID
+	if got := formatParent(&id); got != testParentID {
+		t.Errorf("parent = %q, want the full id so the tree can be reconstructed", got)
 	}
 }
