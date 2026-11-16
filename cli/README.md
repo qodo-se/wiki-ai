@@ -102,7 +102,9 @@ EOF
 # walk down one level
 ./wiki-cli children <container-uuid>
 
-# every container with its parent — the whole tree skeleton, one call
+# every container with its parent — the tree skeleton. Paged like any other
+# listing (100 per request max), so page with --offset until you've seen the
+# "showing X-Y of N" total.
 ./wiki-cli list --scope containers --limit 100
 
 # search containers instead of notes (or both)

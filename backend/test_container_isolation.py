@@ -184,3 +184,44 @@ def test_semantic_half_filters_containers_when_hydrating(monkeypatch, client, fa
 
     assert search_module.semantic_search_notes(TOKEN, 10) == []
     assert search_module.semantic_search_notes(TOKEN, 10, Scope.containers)[0].id == fake_vectors
+
+
+def test_semantic_half_does_not_let_a_container_consume_a_result_slot(monkeypatch, client):
+    # Regression: the scope filter runs in SQL, so trimming the ranked ids to
+    # `limit` before it ran let a higher-ranked container eat the only slot and
+    # then get filtered out — returning nothing while a matching note sat right
+    # behind it.
+    container = client.post(
+        "/api/v1/notes",
+        json={"content": f"# Course\n\n{TOKEN}", "kind": "container"},
+    ).json()["id"]
+    note = client.post("/api/v1/notes", json={"content": f"a note mentioning {TOKEN}"}).json()["id"]
+
+    monkeypatch.setattr(search_module, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(
+        search_module,
+        "search_vectors",
+        lambda vector, limit: [
+            {"id": "c0", "score": 0.99, "payload": {"note_id": container}},  # outranks the note
+            {"id": "c1", "score": 0.50, "payload": {"note_id": note}},
+        ],
+    )
+
+    hits = search_module.semantic_search_notes(TOKEN, 1)
+
+    assert [h.id for h in hits] == [note]
+
+
+def test_semantic_half_still_honours_limit(monkeypatch, client):
+    ids = [client.post("/api/v1/notes", json={"content": f"note {i} {TOKEN}"}).json()["id"] for i in range(3)]
+    monkeypatch.setattr(search_module, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(
+        search_module,
+        "search_vectors",
+        lambda vector, limit: [
+            {"id": f"c{i}", "score": 0.9 - i / 100, "payload": {"note_id": nid}}
+            for i, nid in enumerate(ids)
+        ],
+    )
+
+    assert len(search_module.semantic_search_notes(TOKEN, 2)) == 2

@@ -175,6 +175,16 @@ def set_parent(note_id: str, parent_id: str | None) -> None:
     assignment that would push the note past MAX_DEPTH.
     """
     with connect() as db:
+        # BEGIN IMMEDIATE, not a plain read-then-write: python's sqlite3 only
+        # opens a transaction when the first DML runs, so without this the
+        # cycle/kind/depth checks below would read outside any transaction and
+        # the UPDATE would open its own afterwards. Two concurrent moves could
+        # then each validate against the pre-move state and both commit --
+        # making A the parent of B and B the parent of A, a cycle neither call
+        # could see. Taking the write lock up front serializes the whole
+        # check-and-write, and also stops the proposed parent being deleted
+        # between its existence check and the update that points at it.
+        db.execute("BEGIN IMMEDIATE")
         _require(db, note_id)
 
         if parent_id is not None:

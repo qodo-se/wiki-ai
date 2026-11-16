@@ -274,3 +274,51 @@ def test_literal_subpaths_are_not_swallowed_by_the_uuid_route(client):
         res = client.get(f"/api/v1/notes/{note_id}/{suffix}")
         assert res.status_code == 200
         assert res.headers["content-type"].startswith("application/json")
+
+
+# --- review regressions ----------------------------------------------------
+
+
+@pytest.mark.parametrize("content", ["#", "#   ", "##\n\n", "   \n#\n"])
+def test_a_container_whose_title_derives_to_nothing_is_rejected(client, content):
+    # "#" clears the "has a non-blank line" bar but derives to an empty title
+    # once the heading marker is stripped — an unnameable node in the tree.
+    res = client.post("/api/v1/notes", json={"content": content, "kind": "container"})
+    assert res.status_code == 422
+    assert "title line" in res.text
+
+
+def test_update_cannot_reduce_a_container_to_a_bare_heading_marker(client):
+    container_id = _container(client, "Course")
+    assert client.put(f"/api/v1/notes/{container_id}", json={"content": "#"}).status_code == 422
+
+
+def test_list_derives_titles_so_the_skeleton_is_readable(client):
+    # notes.title is never written, so without derivation every container in a
+    # scope=containers listing comes back nameless — leaving the "whole
+    # skeleton in one call" promise technically true but useless.
+    container_id = _container(client, "UH-100")
+    note_id = _note(client, "# Reconstruction essay\n\nbody")
+
+    containers = client.get("/api/v1/notes?scope=containers").json()
+    assert [i["title"] for i in containers["items"]] == ["UH-100"]
+
+    notes = client.get("/api/v1/notes").json()
+    assert [i["title"] for i in notes["items"]] == ["Reconstruction essay"]
+
+
+def test_list_titles_agree_with_every_other_read_surface(client):
+    container_id = _container(client, "UH-100")
+    note_id = _note(client, "# Essay\n\nbody")
+    client.put(f"/api/v1/notes/{note_id}/parent", json={"parent_id": container_id})
+
+    from_list = next(
+        i["title"] for i in client.get("/api/v1/notes?scope=all").json()["items"]
+        if i["id"] == container_id
+    )
+    from_ancestors = client.get(f"/api/v1/notes/{note_id}/ancestors").json()["items"][0]["title"]
+    from_children = client.get(f"/api/v1/notes/{container_id}/children").json()["items"][0]["title"]
+    from_search = client.get("/api/v1/search?q=UH-100&scope=containers").json()["items"][0]["title"]
+
+    assert from_list == from_ancestors == from_search == "UH-100"
+    assert from_children == "Essay"
