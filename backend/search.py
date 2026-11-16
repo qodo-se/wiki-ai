@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from db import connect
 from embeddings import embed_text
+from tree import Scope, scope_sql
 from vectorstore import search_vectors
 
 
@@ -55,11 +56,16 @@ def _build_snippet(content: str, query: str, context: int = 80) -> str:
     return snippet
 
 
-def keyword_matches(query: str) -> list[SearchHit]:
+def keyword_matches(query: str, scope: Scope = Scope.notes) -> list[SearchHit]:
     # Every matching note, ranked, with no pagination applied — used both by
     # the /api/v1/search route (which also needs a total count) and by
     # hybrid_search_notes (which wants the full candidate list to fuse), so
     # the word-boundary matching logic lives in exactly one place.
+    #
+    # scope defaults to notes-only: containers are structural, and a caller
+    # that hasn't asked for them shouldn't have to know they exist. The
+    # predicate itself comes from tree.scope_sql so there is exactly one
+    # definition of what's in scope across every read surface.
     q = query.strip()
     if not q:
         return []
@@ -73,12 +79,14 @@ def keyword_matches(query: str) -> list[SearchHit]:
     # transition ever occurs there even though "C++" is clearly whole-word.
     pattern = f"%{_escape_like(q)}%"
     word_match = re.compile(r"(?<!\w)" + re.escape(q) + r"(?!\w)", re.IGNORECASE)
+    scope_predicate, scope_params = scope_sql(scope)
     with connect() as db:
         rows = db.execute(
             "SELECT id, title, path, content, created_at FROM notes "
             "WHERE content LIKE ? ESCAPE '\\' COLLATE NOCASE "
+            f"AND {scope_predicate} "
             "ORDER BY created_at DESC",
-            (pattern,),
+            (pattern, *scope_params),
         ).fetchall()
 
     hits = []
@@ -120,7 +128,7 @@ _CHUNK_OVERSAMPLE_FACTOR = 8
 _MIN_CHUNK_CANDIDATES = 100
 
 
-def semantic_search_notes(query: str, limit: int) -> list[SemanticSearchHit]:
+def semantic_search_notes(query: str, limit: int, scope: Scope = Scope.notes) -> list[SemanticSearchHit]:
     # Not exposed as its own API route — a benchmark comparing keyword,
     # semantic, hybrid, and LLM-expanded hybrid search (recall@5/@10, MRR,
     # latency, across 11 hand-labeled queries) showed hybrid_search_notes
@@ -150,11 +158,17 @@ def semantic_search_notes(query: str, limit: int) -> list[SemanticSearchHit]:
     if not ranked_note_ids:
         return []
 
+    # Qdrant has no idea what kind a note is, so the scope filter lands here,
+    # when the ranked chunk hits are hydrated back into rows. An out-of-scope
+    # note simply doesn't come back and is skipped below, same as one that's
+    # since been deleted.
     placeholders = ",".join("?" * len(ranked_note_ids))
+    scope_predicate, scope_params = scope_sql(scope)
     with connect() as db:
         rows = db.execute(
-            f"SELECT id, title, path, content, created_at FROM notes WHERE id IN ({placeholders})",
-            ranked_note_ids,
+            f"SELECT id, title, path, content, created_at FROM notes "
+            f"WHERE id IN ({placeholders}) AND {scope_predicate}",
+            (*ranked_note_ids, *scope_params),
         ).fetchall()
     notes_by_id = {row[0]: row for row in rows}
 
@@ -228,7 +242,9 @@ def _fuse_rrf(ranked_lists: list[list]) -> list[HybridSearchHit]:
     ]
 
 
-def hybrid_search_notes(query: str, limit: int, offset: int = 0) -> tuple[list[HybridSearchHit], int]:
+def hybrid_search_notes(
+    query: str, limit: int, offset: int = 0, scope: Scope = Scope.notes
+) -> tuple[list[HybridSearchHit], int]:
     # Keyword and semantic search alone each have a blind spot: a keyword
     # match misses a relevant note that doesn't use the query's exact words,
     # while a semantic match can bury a note that literally contains the
@@ -246,11 +262,18 @@ def hybrid_search_notes(query: str, limit: int, offset: int = 0) -> tuple[list[H
     # across pages — if the candidate pool instead grew with limit/offset,
     # "total" would appear to shift as the user paged deeper. Cheap at this
     # app's realistic (personal-wiki-scale) data.
+    # Counts only in-scope notes: sizing the candidate pool off the whole
+    # table would be harmless, but the same predicate has to apply to every
+    # count in this feature (see test_container_isolation.py), and keeping it
+    # uniform is what makes that checkable.
+    scope_predicate, scope_params = scope_sql(scope)
     with connect() as db:
-        total_notes = db.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        total_notes = db.execute(
+            f"SELECT COUNT(*) FROM notes WHERE {scope_predicate}", scope_params
+        ).fetchone()[0]
     candidate_pool = min(total_notes, _MAX_HYBRID_CANDIDATE_NOTES)
 
-    keyword_hits = keyword_matches(q)
-    semantic_hits = semantic_search_notes(q, candidate_pool)
+    keyword_hits = keyword_matches(q, scope)
+    semantic_hits = semantic_search_notes(q, candidate_pool, scope)
     fused = _fuse_rrf([keyword_hits, semantic_hits])
     return fused[offset : offset + limit], len(fused)

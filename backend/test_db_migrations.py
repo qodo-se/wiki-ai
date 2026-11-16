@@ -240,3 +240,59 @@ def test_failed_migration_rolls_back_partial_changes(monkeypatch):
     raw = sqlite3.connect(db.DB_PATH, timeout=db.CONNECT_TIMEOUT_SECONDS)
     assert "archived" not in _column_names(raw, "notes")
     assert db._current_version(raw) == 0
+
+
+def test_migration_4_adds_tree_columns_without_touching_existing_rows(monkeypatch):
+    # Runs the *real* migration list, not a synthetic one: this is the
+    # guarantee that an existing wiki survives the knowledge-tree upgrade, so
+    # it has to exercise what actually ships.
+    real_migrations = db.MIGRATIONS
+    monkeypatch.setattr(db, "MIGRATIONS", [m for m in real_migrations if m[0] <= 3])
+    conn = db.connect()
+    conn.execute(
+        "INSERT INTO notes (id, content, path, title, created_at, updated_at) "
+        "VALUES ('n1', '# Existing', '/recipe/thai', 'Existing', "
+        "'2020-01-01 00:00:00', '2020-02-02 00:00:00')"
+    )
+    conn.commit()
+    before = conn.execute(
+        "SELECT id, content, path, title, created_at, updated_at FROM notes WHERE id = 'n1'"
+    ).fetchone()
+    conn.close()
+
+    monkeypatch.setattr(db, "MIGRATIONS", real_migrations)
+    conn = db.connect()
+
+    columns = _column_names(conn, "notes")
+    assert "kind" in columns
+    assert "parent_id" in columns
+    assert db._current_version(conn) == real_migrations[-1][0]
+
+    # Every pre-existing row defaults to a plain, unparented note...
+    assert conn.execute("SELECT kind, parent_id FROM notes WHERE id = 'n1'").fetchone() == ("note", None)
+    # ...and nothing else about it moved.
+    after = conn.execute(
+        "SELECT id, content, path, title, created_at, updated_at FROM notes WHERE id = 'n1'"
+    ).fetchone()
+    assert after == before
+
+
+def test_migration_4_backs_up_before_altering_an_existing_database(monkeypatch):
+    real_migrations = db.MIGRATIONS
+    monkeypatch.setattr(db, "MIGRATIONS", [m for m in real_migrations if m[0] <= 3])
+    conn = db.connect()
+    conn.execute("INSERT INTO notes (id, content) VALUES ('n1', 'hello')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "MIGRATIONS", real_migrations)
+    db.connect()
+
+    assert glob.glob(os.path.join(db._backup_dir(), "wiki-v3-*.db"))
+
+
+def test_migration_4_indexes_the_tree_columns(monkeypatch):
+    conn = db.connect()
+    indexes = {row[1] for row in conn.execute("PRAGMA index_list(notes)")}
+    assert "idx_notes_parent_id" in indexes
+    assert "idx_notes_kind" in indexes

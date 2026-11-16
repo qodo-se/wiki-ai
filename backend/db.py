@@ -116,6 +116,28 @@ MIGRATIONS: list[tuple[int, list]] = [
         );
         """,
     ]),
+    # The knowledge tree: `kind` separates container notes (which exist to group
+    # other notes and describe what that grouping *is*) from ordinary notes, and
+    # `parent_id` is a note's single primary parent — NULL meaning top level, so
+    # the vault is a forest rather than a single-rooted tree.
+    #
+    # Deliberately columns on `notes` rather than a separate table: a container
+    # IS a note (same CRUD, same editor, same embeddings, same backup), and the
+    # only thing that makes it a container is that `kind` keeps it out of
+    # ordinary note results. `path` is untouched and keeps working alongside
+    # this — the tree is additive, not a replacement for it.
+    #
+    # No FOREIGN KEY on parent_id: this database never enables
+    # `PRAGMA foreign_keys`, so declaring one would be documentation that
+    # doesn't execute (existing images.note_id has none either, for the same
+    # reason). Referential integrity is enforced in routes.notes, and read paths
+    # tolerate a dangling parent_id rather than assuming the row is still there.
+    (4, [
+        "ALTER TABLE notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'note';",
+        "ALTER TABLE notes ADD COLUMN parent_id TEXT;",
+        "CREATE INDEX idx_notes_parent_id ON notes (parent_id);",
+        "CREATE INDEX idx_notes_kind ON notes (kind);",
+    ]),
 ]
 
 

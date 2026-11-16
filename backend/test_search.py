@@ -172,8 +172,8 @@ def _hit(cls, note_id, **overrides):
 
 def test_hybrid_search_empty_query_short_circuits(monkeypatch):
     called = []
-    monkeypatch.setattr(search, "keyword_matches", lambda q: called.append("kw") or [])
-    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit: called.append("sem") or [])
+    monkeypatch.setattr(search, "keyword_matches", lambda q, scope=None: called.append("kw") or [])
+    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit, scope=None: called.append("sem") or [])
     assert search.hybrid_search_notes("   ", 10) == ([], 0)
     assert called == []
 
@@ -182,7 +182,7 @@ def test_hybrid_search_ranks_notes_found_by_both_searches_highest(monkeypatch):
     monkeypatch.setattr(
         search,
         "keyword_matches",
-        lambda q: [
+        lambda q, scope=None: [
             _hit(search.SearchHit, "kw-only", score=1),
             _hit(search.SearchHit, "both", score=1),
         ],
@@ -190,7 +190,7 @@ def test_hybrid_search_ranks_notes_found_by_both_searches_highest(monkeypatch):
     monkeypatch.setattr(
         search,
         "semantic_search_notes",
-        lambda q, limit: [
+        lambda q, limit, scope=None: [
             _hit(search.SemanticSearchHit, "both", score=0.9),
             _hit(search.SemanticSearchHit, "sem-only", score=0.5),
         ],
@@ -211,12 +211,12 @@ def test_hybrid_search_surfaces_an_exact_keyword_match_the_embedding_missed(monk
     monkeypatch.setattr(
         search,
         "keyword_matches",
-        lambda q: [_hit(search.SearchHit, "exact-match", score=1)],
+        lambda q, scope=None: [_hit(search.SearchHit, "exact-match", score=1)],
     )
     monkeypatch.setattr(
         search,
         "semantic_search_notes",
-        lambda q, limit: [_hit(search.SemanticSearchHit, f"other-{i}", score=0.9 - i / 100) for i in range(20)],
+        lambda q, limit, scope=None: [_hit(search.SemanticSearchHit, f"other-{i}", score=0.9 - i / 100) for i in range(20)],
     )
 
     hits, _ = search.hybrid_search_notes("vehicle", 10)
@@ -228,9 +228,9 @@ def test_hybrid_search_respects_limit_but_reports_the_full_total(monkeypatch):
     monkeypatch.setattr(
         search,
         "keyword_matches",
-        lambda q: [_hit(search.SearchHit, str(i), score=1) for i in range(5)],
+        lambda q, scope=None: [_hit(search.SearchHit, str(i), score=1) for i in range(5)],
     )
-    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit: [])
+    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit, scope=None: [])
 
     hits, total = search.hybrid_search_notes("q", 2)
 
@@ -242,9 +242,9 @@ def test_hybrid_search_offset_pages_into_the_fused_ranking(monkeypatch):
     monkeypatch.setattr(
         search,
         "keyword_matches",
-        lambda q: [_hit(search.SearchHit, str(i), score=1) for i in range(5)],
+        lambda q, scope=None: [_hit(search.SearchHit, str(i), score=1) for i in range(5)],
     )
-    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit: [])
+    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit, scope=None: [])
 
     hits, total = search.hybrid_search_notes("q", limit=2, offset=2)
 
@@ -259,10 +259,10 @@ def test_hybrid_search_semantic_pool_matches_total_note_count_not_requested_limi
     for i in range(7):
         _insert_note(f"n{i}", f"content {i}")
 
-    monkeypatch.setattr(search, "keyword_matches", lambda q: [])
+    monkeypatch.setattr(search, "keyword_matches", lambda q, scope=None: [])
     captured = {}
 
-    def fake_semantic_search_notes(q, limit):
+    def fake_semantic_search_notes(q, limit, scope=None):
         captured["pool"] = limit
         return []
 
@@ -278,10 +278,10 @@ def test_hybrid_search_caps_semantic_pool_at_max_candidate_notes(monkeypatch):
     for i in range(10):
         _insert_note(f"n{i}", f"content {i}")
 
-    monkeypatch.setattr(search, "keyword_matches", lambda q: [])
+    monkeypatch.setattr(search, "keyword_matches", lambda q, scope=None: [])
     captured = {}
 
-    def fake_semantic_search_notes(q, limit):
+    def fake_semantic_search_notes(q, limit, scope=None):
         captured["pool"] = limit
         return []
 
