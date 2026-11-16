@@ -90,19 +90,53 @@ func (c *client) doWithClient(httpClient *http.Client, method, path string, quer
 }
 
 type noteSummary struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Path    string `json:"path"`
+	Preview string `json:"preview"`
+	// Kind and ParentID are pointers/zero-tolerant so this client still
+	// parses a response from a backend predating the knowledge tree, where
+	// neither field is present at all.
+	CreatedAt string  `json:"created_at"`
+	Kind      string  `json:"kind"`
+	ParentID  *string `json:"parent_id"`
+}
+
+type noteMeta struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	Path      string  `json:"path"`
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
+	Kind      string  `json:"kind"`
+	ParentID  *string `json:"parent_id"`
+}
+
+type ancestorNode struct {
+	ID               string `json:"id"`
+	Title            string `json:"title"`
+	Kind             string `json:"kind"`
+	Content          string `json:"content"`
+	ContentTruncated bool   `json:"content_truncated"`
+}
+
+type ancestorsResponse struct {
+	Items []ancestorNode `json:"items"`
+}
+
+type childSummary struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
-	Path      string `json:"path"`
+	Kind      string `json:"kind"`
 	Preview   string `json:"preview"`
 	CreatedAt string `json:"created_at"`
 }
 
-type noteMeta struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Path      string `json:"path"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+type childListResponse struct {
+	Items  []childSummary `json:"items"`
+	Total  int            `json:"total"`
+	Limit  int            `json:"limit"`
+	Offset int            `json:"offset"`
 }
 
 type searchHit struct {
@@ -128,11 +162,21 @@ type searchResponse struct {
 	Offset int         `json:"offset"`
 }
 
-func (c *client) listNotes(limit, offset int) (*noteListResponse, error) {
-	body, err := c.do(http.MethodGet, "/api/v1/notes", url.Values{
+// withScope adds a scope filter only when one was asked for, so a command
+// that doesn't mention scope sends exactly the request it always has and
+// lets the server apply its own default (notes only).
+func withScope(v url.Values, scope string) url.Values {
+	if scope != "" {
+		v.Set("scope", scope)
+	}
+	return v
+}
+
+func (c *client) listNotes(limit, offset int, scope string) (*noteListResponse, error) {
+	body, err := c.do(http.MethodGet, "/api/v1/notes", withScope(url.Values{
 		"limit":  {fmt.Sprint(limit)},
 		"offset": {fmt.Sprint(offset)},
-	}, nil)
+	}, scope), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -165,11 +209,15 @@ func (c *client) getNoteMeta(id string) (*noteMeta, error) {
 
 // createNote asks the server to allocate a new note id. The client never
 // picks the id itself.
-func (c *client) createNote(content, path string) (string, error) {
-	payload, err := json.Marshal(map[string]string{
+func (c *client) createNote(content, path, kind string) (string, error) {
+	fields := map[string]string{
 		"content": content,
 		"path":    path,
-	})
+	}
+	if kind != "" {
+		fields["kind"] = kind
+	}
+	payload, err := json.Marshal(fields)
 	if err != nil {
 		return "", err
 	}
@@ -277,12 +325,12 @@ func (c *client) uploadImage(noteID, path string) (*uploadedImage, error) {
 	return &img, nil
 }
 
-func (c *client) search(query string, limit, offset int) (*searchResponse, error) {
-	body, err := c.do(http.MethodGet, "/api/v1/search", url.Values{
+func (c *client) search(query string, limit, offset int, scope string) (*searchResponse, error) {
+	body, err := c.do(http.MethodGet, "/api/v1/search", withScope(url.Values{
 		"q":      {query},
 		"limit":  {fmt.Sprint(limit)},
 		"offset": {fmt.Sprint(offset)},
-	}, nil)
+	}, scope), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -400,12 +448,12 @@ func filenameFromContentDisposition(header string) string {
 	return params["filename"]
 }
 
-func (c *client) hybridSearch(query string, limit, offset int) (*searchResponse, error) {
-	body, err := c.do(http.MethodGet, "/api/v1/search/hybrid", url.Values{
+func (c *client) hybridSearch(query string, limit, offset int, scope string) (*searchResponse, error) {
+	body, err := c.do(http.MethodGet, "/api/v1/search/hybrid", withScope(url.Values{
 		"q":      {query},
 		"limit":  {fmt.Sprint(limit)},
 		"offset": {fmt.Sprint(offset)},
-	}, nil)
+	}, scope), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -414,6 +462,48 @@ func (c *client) hybridSearch(query string, limit, offset int) (*searchResponse,
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// getNoteAncestors returns the containers a note lives under, root first.
+func (c *client) getNoteAncestors(id string) (*ancestorsResponse, error) {
+	body, err := c.do(http.MethodGet, "/api/v1/notes/"+id+"/ancestors", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp ancestorsResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// getNoteChildren returns what's filed directly under a note, one level down.
+func (c *client) getNoteChildren(id string, limit, offset int) (*childListResponse, error) {
+	body, err := c.do(http.MethodGet, "/api/v1/notes/"+id+"/children", url.Values{
+		"limit":  {fmt.Sprint(limit)},
+		"offset": {fmt.Sprint(offset)},
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp childListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// setNoteParent files a note under a container, or moves it back to the top
+// level when parentID is nil. The nil case has to serialize as an explicit
+// JSON null rather than an omitted key — that's what tells the server to
+// clear the parent instead of leaving it alone.
+func (c *client) setNoteParent(id string, parentID *string) error {
+	payload, err := json.Marshal(map[string]*string{"parent_id": parentID})
+	if err != nil {
+		return err
+	}
+	_, err = c.do(http.MethodPut, "/api/v1/notes/"+id+"/parent", nil, payload)
+	return err
 }
 
 type appConfig struct {

@@ -391,3 +391,35 @@ def test_reorganize_notes_rejects_concurrent_calls():
             categorize.reorganize_notes()
     finally:
         categorize._reorganize_lock.release()
+
+
+def test_reorganize_leaves_containers_alone(monkeypatch):
+    # Containers live in the tree, not in the path hierarchy — reorganize must
+    # not re-file them (or churn their updated_at) on every run.
+    import tree
+
+    _insert_note("book-a", "Dune: a desert planet story", title="Dune")
+    _insert_note("book-b", "1984: a dystopian future", title="1984")
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO notes (id, content, path, title, kind, updated_at) "
+            "VALUES ('box', '# Box', '/original', 'Box', ?, '2020-01-01 00:00:00')",
+            (tree.KIND_CONTAINER,),
+        )
+
+    def fake_generate(prompt):
+        assert "Note title: Box" not in prompt, "a container was sent to the classifier"
+        if "Here is a list of" in prompt:
+            return '{"books": "books"}'
+        return "none" if "Existing subdirectories" in prompt else "books"
+
+    monkeypatch.setattr(categorize, "generate_text", fake_generate)
+
+    result = categorize.reorganize_notes()
+
+    # Only the two real notes were classified; the container never entered.
+    assert result["classified"] == 2
+    with db.connect() as conn:
+        assert conn.execute(
+            "SELECT path, updated_at FROM notes WHERE id = 'box'"
+        ).fetchone() == ("/original", "2020-01-01 00:00:00")

@@ -8,19 +8,40 @@ HTTP (not stdio), so it can run detached and be reached by other containers.
 
 | Tool | wiki-cli equivalent |
 |---|---|
-| `list_notes(limit, offset)` | `list` |
+| `list_notes(limit, offset, scope)` | `list` |
 | `get_note(note_id)` | `get` |
 | `get_note_meta(note_id)` | `meta` |
-| `create_note(content, path)` | `create` |
+| `create_note(content, path, kind)` | `create` |
 | `update_note(note_id, content, path=None)` | `update` |
 | `delete_note(note_id)` | `delete` |
-| `search_notes(query, limit, offset)` | `search` |
-| `search_notes_hybrid(query, limit, offset)` | `search-hybrid` |
+| `search_notes(query, limit, offset, scope)` | `search` |
+| `search_notes_hybrid(query, limit, offset, scope)` | `search-hybrid` |
+| `search_containers(query, limit, offset)` | `search --scope containers` |
+| `get_note_ancestors(note_id)` | `ancestors` |
+| `get_note_children(note_id, limit, offset)` | `children` |
+| `set_note_parent(note_id, parent_id=None)` | `set-parent` |
 | `get_config()` | `config get` |
 | `set_config(...)` | `config set` |
 | `reindex()` | `reindex` |
 | `create_backup()` | `backup` |
 | `upload_image(note_id, filename, content_base64)` | `upload-image` |
+
+### The knowledge tree
+
+Notes form a tree. A **container** is a note that groups other notes and whose
+body says what that grouping *is*; a note has at most one parent, which must
+be a container. Containers are kept out of ordinary note results, so
+`list_notes` and the search tools never surface them unless `scope` asks for
+them (`"notes"` by default, or `"containers"` / `"all"`).
+
+`get_note_ancestors` is the tool that earns the feature. A note filed under
+something called `UH-100` is uninterpretable on its own; walking up returns
+each container's prose — that UH-100 was a 2018 college course, say, making
+its notes historical rather than current — which is exactly the context a
+model needs before judging whether a note is relevant or current.
+
+`list_notes(scope="containers")` returns every container with its `parent_id`,
+so the whole tree skeleton arrives in one call with no recursive traversal.
 
 Two tools deliberately don't take a local filesystem path the way their CLI
 equivalent does, since this server may run in a container with no access to
