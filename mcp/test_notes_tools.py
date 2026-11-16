@@ -101,7 +101,7 @@ async def test_get_note_meta_success(install_client):
 async def test_create_note_returns_server_allocated_id(install_client):
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body == {"content": "hi", "path": "/docs/x"}
+        assert body == {"content": "hi", "path": "/docs/x", "kind": "note"}
         return httpx.Response(200, json={"id": "new-id"})
 
     install_client(handler)

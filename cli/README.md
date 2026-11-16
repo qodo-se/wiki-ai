@@ -66,3 +66,46 @@ echo "hello wiki" | ./wiki-cli create
 ./wiki-cli list --url http://wiki.example.com
 WIKI_URL=http://wiki.example.com ./wiki-cli list
 ```
+
+## The knowledge tree
+
+Notes form a tree. A **container** is a note that groups other notes and whose
+body says what that grouping *is* — what the course or project was, when it
+ran, whether it's still current. A note has at most one parent, which must be
+a container; a note with no parent sits at the top level.
+
+The point is `ancestors`. A note filed under something called `UH-100` tells
+you nothing on its own, but walking up returns each container's prose, which
+is what makes the note interpretable — by you a year later, or by an agent
+reading through the MCP server.
+
+Containers are kept out of ordinary listing and search, so they never clutter
+results. Pass `--scope` when you want them.
+
+```sh
+# create a container — its first non-blank line becomes its name, and the
+# rest is the description the walk-up hands back
+./wiki-cli create --kind container <<'EOF'
+# UH-100
+
+A 100-level college survey course I took in 2018. These notes are
+historical — useful background, not current thinking.
+EOF
+
+# file a note under it (or move it back to the top level)
+./wiki-cli set-parent <note-uuid> --parent <container-uuid>
+./wiki-cli set-parent <note-uuid> --clear
+
+# walk up: the containers above a note, root first
+./wiki-cli ancestors <note-uuid>
+
+# walk down one level
+./wiki-cli children <container-uuid>
+
+# every container with its parent — the whole tree skeleton, one call
+./wiki-cli list --scope containers --limit 100
+
+# search containers instead of notes (or both)
+./wiki-cli search --scope containers "college"
+./wiki-cli search --scope all "history"
+```

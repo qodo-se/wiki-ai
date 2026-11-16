@@ -8,7 +8,9 @@ import re
 import httpx
 
 from models import (
+    AncestorsResponse,
     AppConfig,
+    ChildListResponse,
     NoteListResponse,
     NoteMeta,
     ReindexResult,
@@ -73,9 +75,15 @@ class WikiClient:
             raise WikiAPIError(resp.status_code, resp.text)
         return resp
 
-    async def list_notes(self, limit: int, offset: int) -> NoteListResponse:
+    async def list_notes(
+        self, limit: int, offset: int, scope: str | None = None
+    ) -> NoteListResponse:
+        # scope is omitted from the query entirely when the caller doesn't ask
+        # for one, so the request stays byte-identical to what this client sent
+        # before the knowledge tree existed. The server's own default (notes
+        # only) applies either way.
         resp = await self._request(
-            "GET", "/api/v1/notes", params={"limit": limit, "offset": offset}
+            "GET", "/api/v1/notes", params=_with_scope({"limit": limit, "offset": offset}, scope)
         )
         return NoteListResponse.model_validate(resp.json())
 
@@ -91,10 +99,11 @@ class WikiClient:
 
     # create_note asks the server to allocate a new note id; the client never
     # picks the id itself.
-    async def create_note(self, content: str, path: str) -> str:
-        resp = await self._request(
-            "POST", "/api/v1/notes", json={"content": content, "path": path}
-        )
+    async def create_note(self, content: str, path: str, kind: str | None = None) -> str:
+        body = {"content": content, "path": path}
+        if kind is not None:
+            body["kind"] = kind
+        resp = await self._request("POST", "/api/v1/notes", json=body)
         return resp.json()["id"]
 
     async def put_note(self, note_id: str, content: str, path: str) -> None:
@@ -107,19 +116,53 @@ class WikiClient:
         note_id = _require_valid_note_id(note_id)
         await self._request("DELETE", f"/api/v1/notes/{note_id}")
 
-    async def search(self, query: str, limit: int, offset: int) -> SearchResponse:
+    async def search(
+        self, query: str, limit: int, offset: int, scope: str | None = None
+    ) -> SearchResponse:
         resp = await self._request(
-            "GET", "/api/v1/search", params={"q": query, "limit": limit, "offset": offset}
+            "GET",
+            "/api/v1/search",
+            params=_with_scope({"q": query, "limit": limit, "offset": offset}, scope),
         )
         return SearchResponse.model_validate(resp.json())
 
-    async def hybrid_search(self, query: str, limit: int, offset: int) -> SearchResponse:
+    async def hybrid_search(
+        self, query: str, limit: int, offset: int, scope: str | None = None
+    ) -> SearchResponse:
         resp = await self._request(
             "GET",
             "/api/v1/search/hybrid",
-            params={"q": query, "limit": limit, "offset": offset},
+            params=_with_scope({"q": query, "limit": limit, "offset": offset}, scope),
         )
         return SearchResponse.model_validate(resp.json())
+
+    async def get_note_ancestors(self, note_id: str) -> AncestorsResponse:
+        note_id = _require_valid_note_id(note_id)
+        resp = await self._request("GET", f"/api/v1/notes/{note_id}/ancestors")
+        return AncestorsResponse.model_validate(resp.json())
+
+    async def get_note_children(
+        self, note_id: str, limit: int, offset: int
+    ) -> ChildListResponse:
+        note_id = _require_valid_note_id(note_id)
+        resp = await self._request(
+            "GET",
+            f"/api/v1/notes/{note_id}/children",
+            params={"limit": limit, "offset": offset},
+        )
+        return ChildListResponse.model_validate(resp.json())
+
+    async def set_note_parent(self, note_id: str, parent_id: str | None) -> None:
+        note_id = _require_valid_note_id(note_id)
+        # A parent id is a note id and lands in the request body rather than
+        # the path, but it's validated to the same standard anyway -- a caller
+        # that passes garbage should hear about it here, not as a 400 from the
+        # server three layers down.
+        if parent_id is not None:
+            parent_id = _require_valid_note_id(parent_id)
+        await self._request(
+            "PUT", f"/api/v1/notes/{note_id}/parent", json={"parent_id": parent_id}
+        )
 
     async def get_config(self) -> AppConfig:
         resp = await self._request("GET", "/api/v1/config")
@@ -177,6 +220,10 @@ class WikiClient:
             timeout=LONG_TIMEOUT,
         )
         return UploadedImage.model_validate(resp.json())
+
+
+def _with_scope(params: dict, scope: str | None) -> dict:
+    return params if scope is None else {**params, "scope": scope}
 
 
 def _filename_from_content_disposition(header: str) -> str | None:
