@@ -304,3 +304,69 @@ def test_promote_children_leaves_other_notes_alone():
     assert _parent_of("theirs") is None
     with connect() as db:
         assert db.execute("SELECT COUNT(*) FROM notes").fetchone()[0] == 3
+
+
+# --- review pass 2 regressions ---------------------------------------------
+
+
+def test_children_checks_existence_inside_the_transaction():
+    # The check used to run before BEGIN, so a delete committing in the gap
+    # turned a 404 into a successful empty page for a note already gone.
+    # Asserts the ordering directly: BEGIN must precede the existence SELECT.
+    statements = []
+    real_connect = tree.connect
+
+    class RecordingConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *args):
+            statements.append(sql.strip().split()[0].upper())
+            return self._inner.execute(sql, *args)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    tree.connect = lambda: RecordingConn(real_connect())
+    try:
+        _insert("box", content="# Box", kind=tree.KIND_CONTAINER)
+        statements.clear()
+        tree.children("box", limit=10, offset=0)
+    finally:
+        tree.connect = real_connect
+
+    assert statements[0] == "BEGIN", f"expected BEGIN first, got {statements}"
+    assert "SELECT" in statements[1:]
+
+
+def test_children_404s_for_a_note_that_no_longer_exists():
+    _insert("box", content="# Box", kind=tree.KIND_CONTAINER)
+    with connect() as db:
+        db.execute("DELETE FROM notes WHERE id = 'box'")
+
+    with pytest.raises(NoteNotFound):
+        tree.children("box", limit=10, offset=0)
+
+
+def test_children_count_and_page_agree_under_the_same_snapshot():
+    _insert("box", content="# Box", kind=tree.KIND_CONTAINER)
+    for i in range(5):
+        _insert(f"n{i}", parent_id="box")
+
+    items, total = tree.children("box", limit=10, offset=0)
+
+    assert total == len(items) == 5
+
+
+def test_ancestors_walks_a_single_consistent_snapshot():
+    # Each hop is its own SELECT; the read transaction is what stops them
+    # landing on different committed states and splicing together a chain
+    # that never simultaneously existed.
+    _chain("a", "b", "c")
+    _insert("note", parent_id="c")
+
+    assert [x["id"] for x in tree.ancestors("note")] == ["a", "b", "c"]

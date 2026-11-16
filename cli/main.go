@@ -341,10 +341,10 @@ func runSearch(args []string) {
 	offset := fs.Int("offset", 0, "number of results to skip (for paging)")
 	scope := addScopeFlag(fs)
 	urlFlag := addURLFlag(fs)
-	fs.Parse(args)
+	query := parsePositional(fs, args)
 	url := *urlFlag
 
-	if fs.NArg() < 1 {
+	if query == "" {
 		fmt.Fprintln(os.Stderr, "usage: wiki-cli search <query>")
 		os.Exit(1)
 	}
@@ -355,7 +355,7 @@ func runSearch(args []string) {
 
 	requireValidScope(*scope)
 
-	resp, err := newClient(url).search(fs.Arg(0), *limit, *offset, *scope)
+	resp, err := newClient(url).search(query, *limit, *offset, *scope)
 	if err != nil {
 		fail(err)
 	}
@@ -365,8 +365,8 @@ func runSearch(args []string) {
 	printSearchPageInfo(resp, *limit)
 }
 
-// parsePositional pulls out the command's <uuid> argument and lets flags sit
-// on either side of it. Go's flag package stops parsing at the first
+// parsePositional pulls out a command's positional argument (a <uuid>, or
+// search's <query>) and lets flags sit on either side of it. Go's flag package stops parsing at the first
 // non-flag argument, so a bare fs.Parse(args) would silently drop the flags
 // in `set-parent <uuid> --parent <uuid>` — the form these commands document
 // and the natural one to type. Parsing twice (leading flags, then the
@@ -567,10 +567,10 @@ func runHybridSearch(args []string) {
 	offset := fs.Int("offset", 0, "number of results to skip (for paging)")
 	scope := addScopeFlag(fs)
 	urlFlag := addURLFlag(fs)
-	fs.Parse(args)
+	query := parsePositional(fs, args)
 	url := *urlFlag
 
-	if fs.NArg() < 1 {
+	if query == "" {
 		fmt.Fprintln(os.Stderr, "usage: wiki-cli search-hybrid <query>")
 		os.Exit(1)
 	}
@@ -581,7 +581,7 @@ func runHybridSearch(args []string) {
 
 	requireValidScope(*scope)
 
-	resp, err := newClient(url).hybridSearch(fs.Arg(0), *limit, *offset, *scope)
+	resp, err := newClient(url).hybridSearch(query, *limit, *offset, *scope)
 	if err != nil {
 		fail(err)
 	}

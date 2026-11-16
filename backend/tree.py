@@ -101,6 +101,12 @@ def ancestors(note_id: str) -> list[dict]:
     """
     chain = []
     with connect() as db:
+        # One read transaction for the whole walk. Each hop is its own SELECT,
+        # so without this they can land on different committed states: move a
+        # container after its child link is read, then move that container's
+        # old parent, and the chain returned can splice together links that
+        # were never simultaneously ancestors of this note.
+        db.execute("BEGIN")
         row = _require(db, note_id)
         current = row[3]
         seen = set()
@@ -135,11 +141,13 @@ def children(note_id: str, limit: int, offset: int) -> tuple[list[dict], int]:
     error.
     """
     with connect() as db:
-        _require(db, note_id)
-        # One snapshot for both statements, same as list_notes: otherwise a
-        # concurrent write between them can report a total that disagrees
-        # with the page.
+        # BEGIN first, then check existence: checking outside the transaction
+        # let a delete commit in between, turning what should be a 404 into a
+        # successful empty page for a note that no longer exists. The same
+        # snapshot also keeps the count and the page below agreeing with each
+        # other, as in list_notes.
         db.execute("BEGIN")
+        _require(db, note_id)
         total = db.execute(
             "SELECT COUNT(*) FROM notes WHERE parent_id = ?", (note_id,)
         ).fetchone()[0]

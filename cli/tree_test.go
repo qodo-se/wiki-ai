@@ -345,3 +345,26 @@ func TestFormatParentDistinguishesTopLevel(t *testing.T) {
 		t.Errorf("parent = %q, want the full id so the tree can be reconstructed", got)
 	}
 }
+
+func TestSearchCommandsAcceptScopeAfterTheQuery(t *testing.T) {
+	// Regression: runSearch/runHybridSearch registered --scope but parsed
+	// once with Go's flag parser, which stops at the positional query — so
+	// `search "college" --scope containers` silently searched notes instead.
+	for _, order := range [][]string{
+		{"college", "--scope", "containers"},
+		{"--scope", "containers", "college"},
+	} {
+		fs := flag.NewFlagSet("search", flag.ContinueOnError)
+		scope := fs.String("scope", "notes", "")
+		fs.Int("limit", 10, "")
+
+		query := parsePositional(fs, order)
+
+		if query != "college" {
+			t.Errorf("%v: query = %q, want college", order, query)
+		}
+		if *scope != "containers" {
+			t.Errorf("%v: scope = %q, want containers", order, *scope)
+		}
+	}
+}
