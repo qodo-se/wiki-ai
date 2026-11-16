@@ -196,11 +196,14 @@ def list_notes(
         ).fetchone()[0]
         rows = db.execute(
             "SELECT id, title, path, substr(content, 1, 120) AS preview, created_at, "
-            # The same leading slice feeds both the preview and the derived
-            # title below -- a title comes from the first non-blank line, so
-            # 120 characters is always enough and whole contents needn't be
-            # read for a listing.
-            "kind, parent_id, substr(content, 1, 120) "
+            # The title slice is taken after trimming leading whitespace, not
+            # from the same raw prefix as the preview: _derive_title uses the
+            # first non-blank line wherever it occurs, so content with more
+            # than 120 characters of leading blank lines would slice to
+            # nothing and list the note as untitled while ancestors and
+            # children still showed its name. Trimming first keeps the slice
+            # bounded and the title identical to every other read surface.
+            "kind, parent_id, substr(ltrim(content, ' ' || char(10) || char(13) || char(9)), 1, 120) "
             f"FROM notes WHERE {scope_predicate} "
             "ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
             (*scope_params, limit, offset),

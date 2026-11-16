@@ -322,3 +322,21 @@ def test_list_titles_agree_with_every_other_read_surface(client):
 
     assert from_list == from_ancestors == from_search == "UH-100"
     assert from_children == "Essay"
+
+
+def test_list_titles_survive_long_leading_whitespace(client):
+    # The title slice is taken after trimming: content with more than 120
+    # characters of leading blank lines used to slice to nothing and list as
+    # untitled, while ancestors and children still showed the real name.
+    padding = "\n" * 200
+    container_id = _note(client, content=f"{padding}# Buried Title\n\nbody", kind="container")
+    note_id = _note(client, content=f"{padding}# Buried Note\n\nbody")
+    client.put(f"/api/v1/notes/{note_id}/parent", json={"parent_id": container_id})
+
+    listed = {i["id"]: i["title"] for i in client.get("/api/v1/notes?scope=all&limit=100").json()["items"]}
+    assert listed[container_id] == "Buried Title"
+    assert listed[note_id] == "Buried Note"
+
+    # and it agrees with the surfaces that read the whole content
+    assert client.get(f"/api/v1/notes/{note_id}/ancestors").json()["items"][0]["title"] == "Buried Title"
+    assert client.get(f"/api/v1/notes/{container_id}/children").json()["items"][0]["title"] == "Buried Note"
