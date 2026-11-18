@@ -165,7 +165,11 @@ def test_semantic_search_ignores_points_from_before_chunking(monkeypatch):
 
 
 def _hit(cls, note_id, **overrides):
-    fields = {"id": note_id, "title": note_id, "path": "/", "preview": "", "created_at": "t"}
+    fields = {
+        "id": note_id, "title": note_id, "path": "/", "preview": "", "created_at": "t",
+        # Tree position defaults to "top level"; tests that care override it.
+        "kind": "note", "parent_id": None, "breadcrumb": "",
+    }
     fields.update(overrides)
     return cls(**fields)
 
@@ -290,3 +294,63 @@ def test_hybrid_search_caps_semantic_pool_at_max_candidate_notes(monkeypatch):
     search.hybrid_search_notes("q", 10)
 
     assert captured["pool"] == 3
+
+
+# --- ranking is unchanged by the breadcrumb work ---------------------------
+
+
+def _ranked(fn):
+    return [(h.id, h.score) for h in fn]
+
+
+def test_keyword_ranking_is_unchanged_by_tree_fields():
+    # The breadcrumb is additive metadata. If adding it ever perturbs order or
+    # scores, this pins exactly what changed.
+    _insert_note("a", "car car car", title="a")          # 3 matches
+    _insert_note("b", "car car", title="b")              # 2
+    _insert_note("c", "car", title="c", created_at="2030-01-01 00:00:00")  # 1, newest
+    _insert_note("d", "car", title="d", created_at="2020-01-01 00:00:00")  # 1, oldest
+    _insert_note("e", "nothing here", title="e")
+
+    assert _ranked(search.keyword_matches("car")) == [
+        ("a", 3), ("b", 2), ("c", 1), ("d", 1),
+    ]
+
+
+def test_keyword_ranking_identical_for_treed_and_untreed_notes():
+    # Same corpus, same scores, whether or not the notes sit in a tree.
+    _insert_note("a", "car car", title="a")
+    _insert_note("b", "car", title="b")
+    before = _ranked(search.keyword_matches("car"))
+
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO notes (id, content, kind) VALUES ('box', '# Box', 'container')"
+        )
+        conn.execute("UPDATE notes SET parent_id = 'box' WHERE id IN ('a','b')")
+
+    after = search.keyword_matches("car")
+    assert _ranked(after) == before
+    assert all(h.breadcrumb == "Box" for h in after)  # tree fields did populate
+
+
+def test_hybrid_fusion_carries_the_tree_fields_through(monkeypatch):
+    # _fuse_rrf rebuilds every hit field by field, so a forgotten line here
+    # yields correct keyword results and empty hybrid ones.
+    _insert_note("n1", "car", title="n1")
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO notes (id, content, kind) VALUES ('box', '# Box', 'container')"
+        )
+        conn.execute("UPDATE notes SET parent_id = 'box' WHERE id = 'n1'")
+    monkeypatch.setattr(search, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(
+        search, "search_vectors",
+        lambda vector, limit: [{"id": "c1", "score": 0.9, "payload": {"note_id": "n1"}}],
+    )
+
+    page, _ = search.hybrid_search_notes("car", 10)
+
+    assert page[0].kind == "note"
+    assert page[0].parent_id == "box"
+    assert page[0].breadcrumb == "Box"

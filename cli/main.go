@@ -361,6 +361,7 @@ func runSearch(args []string) {
 	}
 	for _, h := range resp.Items {
 		fmt.Printf("%s  %-30s %-20s matches:%-3d %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), int(h.Score), sanitizeForTerminal(h.Preview))
+		printBreadcrumb(h)
 	}
 	printSearchPageInfo(resp, *limit)
 }
@@ -398,6 +399,15 @@ func requireValidScope(scope string) {
 	}
 	fmt.Fprintf(os.Stderr, "error: --scope must be \"notes\", \"containers\", or \"all\", got %q\n", sanitizeForTerminal(scope))
 	os.Exit(1)
+}
+
+// printBreadcrumb shows where a hit sits in the tree, on its own indented
+// line so it never disturbs the existing single-line result format. Silent
+// for a top-level note, so output for an untreed vault is unchanged.
+func printBreadcrumb(h searchHit) {
+	if h.Breadcrumb != "" {
+		fmt.Printf("    in %s\n", sanitizeForTerminal(h.Breadcrumb))
+	}
 }
 
 func formatParent(parentID *string) string {
@@ -587,6 +597,7 @@ func runHybridSearch(args []string) {
 	}
 	for _, h := range resp.Items {
 		fmt.Printf("%s  %-30s %-20s score:%.4f %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), h.Score, sanitizeForTerminal(h.Preview))
+		printBreadcrumb(h)
 	}
 	printSearchPageInfo(resp, *limit)
 }

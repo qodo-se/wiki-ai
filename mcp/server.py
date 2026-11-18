@@ -141,7 +141,14 @@ async def search_notes(
 ) -> SearchResponse:
     """Keyword (whole-word match) search over notes.
 
-    scope is "notes" (the default), "containers", or "all"."""
+    scope is "notes" (the default), "containers", or "all".
+
+    Each hit carries its tree position: kind, parent_id, and breadcrumb -- the
+    titles of the containers above it, root first, like
+    "School > UH-100 > US History Foundations" ("" for a top-level note).
+    Use the breadcrumb to tell similar-looking hits apart before deciding
+    which to read; call get_note_ancestors only when you need a container's
+    full description rather than just its name."""
     return await _call(client.search(query, limit, offset, scope))
 
 
@@ -152,7 +159,8 @@ async def search_notes_hybrid(
     """Keyword + semantic search, fused by reciprocal rank fusion -- catches
     notes an exact keyword match would miss semantically, and vice versa.
 
-    scope is "notes" (the default), "containers", or "all"."""
+    scope is "notes" (the default), "containers", or "all". Hits carry the
+    same kind/parent_id/breadcrumb tree position as search_notes."""
     return await _call(client.hybrid_search(query, limit, offset, scope))
 
 

@@ -140,12 +140,17 @@ type childListResponse struct {
 }
 
 type searchHit struct {
-	ID        string  `json:"id"`
-	Title     string  `json:"title"`
-	Path      string  `json:"path"`
-	Preview   string  `json:"preview"`
-	Score     float64 `json:"score"`
-	CreatedAt string  `json:"created_at"`
+	ID      string  `json:"id"`
+	Title   string  `json:"title"`
+	Path    string  `json:"path"`
+	Preview string  `json:"preview"`
+	Score   float64 `json:"score"`
+	// Tree position. Zero-valued when talking to a backend that predates
+	// these fields, same tolerance as noteSummary's.
+	CreatedAt  string  `json:"created_at"`
+	Kind       string  `json:"kind"`
+	ParentID   *string `json:"parent_id"`
+	Breadcrumb string  `json:"breadcrumb"`
 }
 
 type noteListResponse struct {

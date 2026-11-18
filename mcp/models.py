@@ -34,6 +34,12 @@ class SearchHit(BaseModel):
     preview: str
     score: float
     created_at: str
+    # Tree position, so a caller can tell two same-titled hits apart without
+    # a get_note_ancestors call per result. Defaulted for the same reason
+    # NoteSummary's are: a backend predating this still parses.
+    kind: str = "note"
+    parent_id: str | None = None
+    breadcrumb: str = ""
 
 
 class NoteListResponse(BaseModel):

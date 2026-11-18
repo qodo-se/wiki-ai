@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from db import connect
 from embeddings import embed_text
-from tree import Scope, scope_sql
+from tree import Scope, breadcrumb_for, breadcrumb_map, scope_sql
 from vectorstore import search_vectors
 
 
@@ -15,6 +15,11 @@ class SearchHit(BaseModel):
     preview: str
     score: int
     created_at: str
+    # Tree position, so a caller can tell two same-titled hits apart without
+    # a follow-up call per result. breadcrumb is "" for a top-level note.
+    kind: str
+    parent_id: str | None
+    breadcrumb: str
 
 
 class SemanticSearchHit(BaseModel):
@@ -24,6 +29,11 @@ class SemanticSearchHit(BaseModel):
     preview: str
     score: float
     created_at: str
+    # Tree position, so a caller can tell two same-titled hits apart without
+    # a follow-up call per result. breadcrumb is "" for a top-level note.
+    kind: str
+    parent_id: str | None
+    breadcrumb: str
 
 
 def _escape_like(s: str) -> str:
@@ -82,12 +92,16 @@ def keyword_matches(query: str, scope: Scope = Scope.notes) -> list[SearchHit]:
     scope_predicate, scope_params = scope_sql(scope)
     with connect() as db:
         rows = db.execute(
-            "SELECT id, title, path, content, created_at FROM notes "
+            "SELECT id, title, path, content, created_at, kind, parent_id FROM notes "
             "WHERE content LIKE ? ESCAPE '\\' COLLATE NOCASE "
             f"AND {scope_predicate} "
             "ORDER BY created_at DESC",
             (pattern, *scope_params),
         ).fetchall()
+    # One query for every container, then each hit's chain is assembled in
+    # memory below. Resolving breadcrumbs per hit instead would issue up to
+    # MAX_DEPTH queries per result (see test_search_breadcrumb_cost.py).
+    containers = breadcrumb_map()
 
     hits = []
     for row in rows:
@@ -103,6 +117,9 @@ def keyword_matches(query: str, scope: Scope = Scope.notes) -> list[SearchHit]:
                 preview=_build_snippet(content, q),
                 score=count,
                 created_at=row[4],
+                kind=row[5],
+                parent_id=row[6],
+                breadcrumb=breadcrumb_for(row[6], containers),
             )
         )
     # Three stable passes, least significant key first: id (a final,
@@ -173,18 +190,19 @@ def semantic_search_notes(query: str, limit: int, scope: Scope = Scope.notes) ->
     scope_predicate, scope_params = scope_sql(scope)
     with connect() as db:
         rows = db.execute(
-            f"SELECT id, title, path, content, created_at FROM notes "
+            f"SELECT id, title, path, content, created_at, kind, parent_id FROM notes "
             f"WHERE id IN ({placeholders}) AND {scope_predicate}",
             (*ranked_note_ids, *scope_params),
         ).fetchall()
     notes_by_id = {row[0]: row for row in rows}
+    containers = breadcrumb_map()
 
     hits = []
     for note_id in ranked_note_ids:
         row = notes_by_id.get(note_id)
         if row is None:
             continue  # chunks for a note that's since been deleted
-        _, title, path, content, created_at = row
+        _, title, path, content, created_at, kind, parent_id = row
         hits.append(
             SemanticSearchHit(
                 id=row[0],
@@ -193,6 +211,9 @@ def semantic_search_notes(query: str, limit: int, scope: Scope = Scope.notes) ->
                 preview=_build_snippet(content, q),
                 score=best_score_by_note[note_id],
                 created_at=created_at,
+                kind=kind,
+                parent_id=parent_id,
+                breadcrumb=breadcrumb_for(parent_id, containers),
             )
         )
         if len(hits) == limit:
@@ -207,6 +228,11 @@ class HybridSearchHit(BaseModel):
     preview: str
     score: float
     created_at: str
+    # Tree position, so a caller can tell two same-titled hits apart without
+    # a follow-up call per result. breadcrumb is "" for a top-level note.
+    kind: str
+    parent_id: str | None
+    breadcrumb: str
 
 
 # Reciprocal Rank Fusion constant from the original RRF paper (Cormack et al.,
@@ -238,6 +264,9 @@ def _fuse_rrf(ranked_lists: list[list]) -> list[HybridSearchHit]:
     # without it, a tie between two notes' fused scores could shift between
     # page requests and skip or duplicate a note across a page boundary.
     ranked_ids = sorted(rrf_scores, key=lambda note_id: (-rrf_scores[note_id], note_id))
+    # Every field is carried across explicitly, so anything added to the hit
+    # models has to be added here too or hybrid search silently returns it
+    # empty while keyword search looks fine.
     return [
         HybridSearchHit(
             id=hit_by_id[note_id].id,
@@ -246,6 +275,9 @@ def _fuse_rrf(ranked_lists: list[list]) -> list[HybridSearchHit]:
             preview=hit_by_id[note_id].preview,
             score=rrf_scores[note_id],
             created_at=hit_by_id[note_id].created_at,
+            kind=hit_by_id[note_id].kind,
+            parent_id=hit_by_id[note_id].parent_id,
+            breadcrumb=hit_by_id[note_id].breadcrumb,
         )
         for note_id in ranked_ids
     ]
