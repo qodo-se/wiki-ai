@@ -138,7 +138,7 @@ def ancestors(note_id: str) -> list[dict]:
 BREADCRUMB_SEPARATOR = " › "
 
 
-def breadcrumb_map() -> dict[str, tuple[str, str | None]]:
+def breadcrumb_map(db=None) -> dict[str, tuple[str, str | None]]:
     """Every container as {id: (title, parent_id)}, in one query.
 
     Only containers can be parents, so this is the complete set of nodes any
@@ -146,11 +146,19 @@ def breadcrumb_map() -> dict[str, tuple[str, str | None]]:
     page of search hits without going back to the database per hit. A naive
     ancestors() walk per hit would be up to MAX_DEPTH queries times the number
     of hits; this is one, regardless.
+
+    Takes an open connection when the caller has one. A search that reads its
+    matching rows and then opens a second connection for this can straddle a
+    tree move committing in between, and report a hit's old parent_id beside a
+    breadcrumb built from the new hierarchy. Sharing the caller's connection
+    keeps both reads on one snapshot.
     """
-    with connect() as db:
-        rows = db.execute(
-            "SELECT id, content, parent_id FROM notes WHERE kind = ?", (KIND_CONTAINER,)
-        ).fetchall()
+    sql = "SELECT id, content, parent_id FROM notes WHERE kind = ?"
+    if db is not None:
+        rows = db.execute(sql, (KIND_CONTAINER,)).fetchall()
+    else:
+        with connect() as own:
+            rows = own.execute(sql, (KIND_CONTAINER,)).fetchall()
     return {r[0]: (_derive_title_for(r[1]), r[2]) for r in rows}
 
 
@@ -213,12 +221,17 @@ def children(note_id: str, limit: int, offset: int) -> tuple[list[dict], int]:
             "LIMIT ? OFFSET ?",
             (note_id, KIND_CONTAINER, limit, offset),
         ).fetchall()
+    # A container's preview is suppressed here for the same reason it is in
+    # list_notes: it would just repeat the title line and the start of the
+    # description, and browsing the tree a level at a time is exactly when
+    # that bulk is least useful. The key stays present and empty so the shape
+    # never varies by row kind.
     items = [
         {
             "id": r[0],
             "title": _derive_title_for(r[1]),
             "kind": r[2],
-            "preview": r[1][:120],
+            "preview": "" if r[2] == KIND_CONTAINER else r[1][:120],
             "created_at": r[3],
         }
         for r in rows

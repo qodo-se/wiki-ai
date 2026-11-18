@@ -496,3 +496,73 @@ def test_breadcrumb_survives_a_dangling_parent(client):
 
     assert hit["breadcrumb"] == ""
     assert hit["parent_id"] == "ghost"
+
+
+# --- review pass 1 regressions ---------------------------------------------
+
+
+def test_an_empty_parent_body_is_rejected_rather_than_unfiling(client):
+    # `{}` used to mean "clear the parent", so a request that forgot the
+    # field silently unfiled an already-filed note.
+    container_id = _container(client, "Box")
+    note_id = _note(client)
+    client.put(f"/api/v1/notes/{note_id}/parent", json={"parent_id": container_id})
+
+    res = client.put(f"/api/v1/notes/{note_id}/parent", json={})
+
+    assert res.status_code == 422
+    assert client.get(f"/api/v1/notes/{note_id}/meta").json()["parent_id"] == container_id
+
+
+def test_clearing_a_parent_still_works_when_asked_for_explicitly(client):
+    container_id = _container(client, "Box")
+    note_id = _note(client)
+    client.put(f"/api/v1/notes/{note_id}/parent", json={"parent_id": container_id})
+
+    res = client.put(f"/api/v1/notes/{note_id}/parent", json={"parent_id": None})
+
+    assert res.status_code == 200
+    assert client.get(f"/api/v1/notes/{note_id}/meta").json()["parent_id"] is None
+
+
+def test_children_omits_container_previews_too(client):
+    # children() is a listing, so the same rule applies there as in /notes.
+    box = _container(client, "Box")
+    sub = _note(client, content="# Sub\n\nA description that should not be echoed.",
+                kind="container")
+    note = _note(client, content="# Note\n\nOrdinary body.")
+    for child in (sub, note):
+        client.put(f"/api/v1/notes/{child}/parent", json={"parent_id": box})
+
+    items = {i["id"]: i for i in client.get(f"/api/v1/notes/{box}/children").json()["items"]}
+
+    assert items[sub]["preview"] == "", "a container's preview must be empty here too"
+    assert items[sub]["title"] == "Sub", "the title still identifies it"
+    assert "Ordinary body" in items[note]["preview"], "notes keep their preview"
+
+
+def test_a_long_heading_gets_the_same_title_everywhere(client):
+    # list_notes sliced content before deriving the title, so a heading longer
+    # than the slice came out different from every other surface.
+    heading = "H" * 300
+    note_id = _note(client, content=f"# {heading}\n\nbody")
+
+    listed = next(
+        i for i in client.get("/api/v1/notes?limit=100").json()["items"]
+        if i["id"] == note_id
+    )
+    searched = client.get(f"/api/v1/search?q={'H' * 300}").json()["items"]
+
+    assert listed["title"] == heading[:120], "title is derived, then truncated"
+    if searched:
+        assert listed["title"] == searched[0]["title"], "surfaces must agree"
+
+
+def test_many_heading_markers_do_not_empty_the_listed_title(client):
+    note_id = _note(client, content=("#" * 150) + " Real Title\n\nbody")
+
+    listed = next(
+        i for i in client.get("/api/v1/notes?limit=100").json()["items"]
+        if i["id"] == note_id
+    )
+    assert listed["title"] == "Real Title"

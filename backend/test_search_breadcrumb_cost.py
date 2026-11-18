@@ -164,3 +164,35 @@ def test_breadcrumbs_are_actually_populated_at_depth(count_queries):
     assert all(h.breadcrumb == "Level 0 › Level 1 › Level 2" for h in hits), [
         h.breadcrumb for h in hits
     ]
+
+
+def test_no_container_map_is_loaded_when_nothing_matched(count_queries):
+    # A no-hit query used to read every container's body for nothing.
+    _seed(notes=3, depth=3)
+
+    hits, log = count_queries(lambda: search.keyword_matches("nothingmatchesthis"))
+
+    assert hits == []
+    assert log.count("SELECT") == 1, f"should be the match query alone: {log}"
+
+
+def test_hits_and_container_map_share_one_snapshot(count_queries):
+    # Both reads must happen on the same connection, or a tree move landing
+    # between them yields a hit whose parent_id and breadcrumb disagree.
+    _seed(notes=2, depth=2)
+    conns = []
+
+    real = search.connect
+
+    def tracking():
+        c = _CountingConn(real(), [])
+        conns.append(c)
+        return c
+
+    search.connect = tracking
+    try:
+        search.keyword_matches("zzyzx")
+    finally:
+        search.connect = real
+
+    assert len(conns) == 1, f"expected one connection for rows + container map, got {len(conns)}"

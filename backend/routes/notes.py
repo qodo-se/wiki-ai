@@ -144,7 +144,12 @@ class NoteListResponse(BaseModel):
 
 
 class ParentBody(BaseModel):
-    parent_id: str | None = None
+    # No default: a request body of {} is a 422, not a silent unfiling.
+    # Clearing a parent stays possible and stays deliberate -- it needs an
+    # explicit {"parent_id": null}. The CLI already demanded this
+    # explicitness (--parent or --clear, exactly one); this brings the HTTP
+    # and MCP surfaces in line with it.
+    parent_id: str | None
 
 
 class AncestorNode(BaseModel):
@@ -212,7 +217,12 @@ def list_notes(
             # nothing and list the note as untitled while ancestors and
             # children still showed its name. Trimming first keeps the slice
             # bounded and the title identical to every other read surface.
-            "kind, parent_id, substr(ltrim(content, ' ' || char(10) || char(13) || char(9)), 1, 120) "
+            # 400, not 120: _derive_title strips the heading markers and only
+            # then truncates to 120 itself, so slicing at 120 first would eat
+            # characters it would have kept and give a list item a different
+            # title than search, children and ancestors report for the same
+            # row. 400 leaves room for the markers and any leading blanks.
+            "kind, parent_id, substr(ltrim(content, ' ' || char(10) || char(13) || char(9)), 1, 400) "
             f"FROM notes WHERE {scope_predicate} "
             "ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
             (KIND_CONTAINER, *scope_params, limit, offset),

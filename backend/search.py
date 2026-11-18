@@ -98,10 +98,13 @@ def keyword_matches(query: str, scope: Scope = Scope.notes) -> list[SearchHit]:
             "ORDER BY created_at DESC",
             (pattern, *scope_params),
         ).fetchall()
-    # One query for every container, then each hit's chain is assembled in
-    # memory below. Resolving breadcrumbs per hit instead would issue up to
-    # MAX_DEPTH queries per result (see test_search_breadcrumb_cost.py).
-    containers = breadcrumb_map()
+        # One query for every container, then each hit's chain is assembled
+        # in memory below. Resolving breadcrumbs per hit instead would issue
+        # up to MAX_DEPTH queries per result (test_search_breadcrumb_cost.py
+        # holds that line). Skipped entirely when nothing matched, so a query
+        # with no hits doesn't read the containers for nothing — and sharing
+        # this connection keeps the rows above and the map on one snapshot.
+        containers = breadcrumb_map(db) if rows else {}
 
     hits = []
     for row in rows:
@@ -194,8 +197,10 @@ def semantic_search_notes(query: str, limit: int, scope: Scope = Scope.notes) ->
             f"WHERE id IN ({placeholders}) AND {scope_predicate}",
             (*ranked_note_ids, *scope_params),
         ).fetchall()
+        # Same connection as the rows above, and skipped when nothing came
+        # back — see the note in keyword_matches.
+        containers = breadcrumb_map(db) if rows else {}
     notes_by_id = {row[0]: row for row in rows}
-    containers = breadcrumb_map()
 
     hits = []
     for note_id in ranked_note_ids:
