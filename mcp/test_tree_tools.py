@@ -132,13 +132,30 @@ async def test_set_note_parent_files_a_note(install_client):
 
 
 @pytest.mark.asyncio
-async def test_set_note_parent_defaults_to_clearing(install_client):
+async def test_set_note_parent_clears_only_when_asked_explicitly(install_client):
     def handler(request: httpx.Request) -> httpx.Response:
         assert json.loads(request.content) == {"parent_id": None}
         return httpx.Response(200, json={"id": VALID_ID, "parent_id": None})
 
     install_client(handler)
-    assert await server.set_note_parent(note_id=VALID_ID) == VALID_ID
+    assert await server.set_note_parent(note_id=VALID_ID, parent_id=None) == VALID_ID
+
+
+@pytest.mark.asyncio
+async def test_set_note_parent_requires_the_parent_argument(install_client):
+    # It used to default to None, so a call meant as "file this under
+    # something" that forgot the argument quietly unfiled the note instead.
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={})
+
+    install_client(handler)
+    with pytest.raises(TypeError):
+        await server.set_note_parent(note_id=VALID_ID)
+    assert not called, "no request should reach the backend"
 
 
 @pytest.mark.asyncio

@@ -196,9 +196,14 @@ async def get_note_children(note_id: str, limit: int = 10, offset: int = 0) -> C
 
 
 @mcp_server.tool()
-async def set_note_parent(note_id: str, parent_id: str | None = None) -> str:
-    """File a note under a container, or pass parent_id=None to move it back
+async def set_note_parent(note_id: str, parent_id: str | None) -> str:
+    """File a note under a container, or pass parent_id=null to move it back
     to the top level.
+
+    parent_id is required and has no default: omitting it used to mean "clear
+    the parent", so a call meant as "file this somewhere" that forgot the
+    argument would quietly unfile an already-filed note instead. Clearing is
+    still available, it just has to be asked for explicitly.
 
     The parent must be a container. A note has exactly one parent. Assignments
     that would make a cycle, point a note at itself, or nest deeper than 32
