@@ -253,3 +253,70 @@ async def test_search_tools_pass_scope_through(install_client, tool, path):
 
     install_client(handler)
     await tool(query="x", scope="all")
+
+
+# --- breadcrumb on search hits ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_hits_carry_the_breadcrumb(install_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "items": [{
+                "id": VALID_ID, "title": "Reconstruction essay", "path": "/",
+                "preview": "# Reconstruction essay", "score": 2.0, "created_at": "x",
+                "kind": "note", "parent_id": PARENT_ID,
+                "breadcrumb": "School › UH-100 › US History Foundations",
+            }],
+            "total": 1, "limit": 10, "offset": 0,
+        })
+
+    install_client(handler)
+    got = await server.search_notes(query="Reconstruction")
+
+    hit = got.items[0]
+    assert hit.kind == "note"
+    assert hit.parent_id == PARENT_ID
+    assert hit.breadcrumb == "School › UH-100 › US History Foundations"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_hits_carry_the_breadcrumb(install_client):
+    install_client(lambda request: httpx.Response(200, json={
+        "items": [{
+            "id": VALID_ID, "title": "t", "path": "/", "preview": "p",
+            "score": 0.5, "created_at": "x", "kind": "note",
+            "parent_id": PARENT_ID, "breadcrumb": "School › UH-100",
+        }],
+        "total": 1, "limit": 10, "offset": 0,
+    }))
+
+    got = await server.search_notes_hybrid(query="q")
+    assert got.items[0].breadcrumb == "School › UH-100"
+
+
+@pytest.mark.asyncio
+async def test_search_hit_tolerates_a_backend_without_tree_fields(install_client):
+    # A backend predating this change sends none of the three; parsing must
+    # still succeed rather than failing the whole call.
+    install_client(lambda request: httpx.Response(200, json={
+        "items": [{"id": VALID_ID, "title": "t", "path": "/", "preview": "p",
+                   "score": 1.0, "created_at": "x"}],
+        "total": 1, "limit": 10, "offset": 0,
+    }))
+
+    hit = (await server.search_notes(query="q")).items[0]
+    assert (hit.kind, hit.parent_id, hit.breadcrumb) == ("note", None, "")
+
+
+@pytest.mark.asyncio
+async def test_top_level_hit_reports_an_empty_breadcrumb(install_client):
+    install_client(lambda request: httpx.Response(200, json={
+        "items": [{"id": VALID_ID, "title": "t", "path": "/", "preview": "p",
+                   "score": 1.0, "created_at": "x", "kind": "note",
+                   "parent_id": None, "breadcrumb": ""}],
+        "total": 1, "limit": 10, "offset": 0,
+    }))
+
+    hit = (await server.search_notes(query="q")).items[0]
+    assert hit.breadcrumb == "" and hit.parent_id is None

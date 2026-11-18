@@ -132,6 +132,58 @@ def ancestors(note_id: str) -> list[dict]:
     return chain
 
 
+# Joins ancestor titles in a breadcrumb. U+203A rather than "/" so a
+# breadcrumb is never mistaken for a `path` value — the two are different
+# things and will sit next to each other in every search hit.
+BREADCRUMB_SEPARATOR = " › "
+
+
+def breadcrumb_map() -> dict[str, tuple[str, str | None]]:
+    """Every container as {id: (title, parent_id)}, in one query.
+
+    Only containers can be parents, so this is the complete set of nodes any
+    breadcrumb can be built from — which is what lets a caller resolve a whole
+    page of search hits without going back to the database per hit. A naive
+    ancestors() walk per hit would be up to MAX_DEPTH queries times the number
+    of hits; this is one, regardless.
+    """
+    with connect() as db:
+        rows = db.execute(
+            "SELECT id, content, parent_id FROM notes WHERE kind = ?", (KIND_CONTAINER,)
+        ).fetchall()
+    return {r[0]: (_derive_title_for(r[1]), r[2]) for r in rows}
+
+
+def breadcrumb_for(parent_id: str | None, containers: dict[str, tuple[str, str | None]]) -> str:
+    """The titles of the containers above a note, root first, joined.
+
+    Takes the note's own parent_id (not the note), so it works for notes and
+    containers alike — a container's breadcrumb is the chain above it, not
+    including itself. Returns "" for a top-level node, matching ancestors()
+    returning [] rather than null.
+
+    Walks the map from breadcrumb_map() rather than the database, and carries
+    the same guards ancestors() does: a parent_id with no row ends the chain
+    (there is no foreign key, so dangling pointers are reachable), a repeat
+    visit breaks out of a pre-existing cycle, and MAX_DEPTH bounds it either
+    way.
+    """
+    titles = []
+    seen = set()
+    current = parent_id
+    while current is not None and len(titles) < MAX_DEPTH:
+        if current in seen:
+            break  # pre-existing cycle in the data; don't spin on it
+        seen.add(current)
+        entry = containers.get(current)
+        if entry is None:
+            break  # dangling parent_id, or a parent that isn't a container
+        title, current = entry
+        titles.append(title)
+    titles.reverse()
+    return BREADCRUMB_SEPARATOR.join(titles)
+
+
 def children(note_id: str, limit: int, offset: int) -> tuple[list[dict], int]:
     """One level down: the notes and containers whose parent is note_id,
     newest first within each kind, containers before notes.

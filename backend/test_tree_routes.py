@@ -5,8 +5,12 @@ response shapes, and the route-shadowing hazard of hanging literal sub-paths
 off a router that already declares GET /{uuid}.
 """
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
+
+from db import connect
 
 
 @pytest.fixture
@@ -340,3 +344,155 @@ def test_list_titles_survive_long_leading_whitespace(client):
     # and it agrees with the surfaces that read the whole content
     assert client.get(f"/api/v1/notes/{note_id}/ancestors").json()["items"][0]["title"] == "Buried Title"
     assert client.get(f"/api/v1/notes/{container_id}/children").json()["items"][0]["title"] == "Buried Note"
+
+
+# --- container previews in listings (Reqs 6, 7, 8) -------------------------
+
+
+def test_container_preview_is_empty_in_listings(client):
+    container_id = _note(
+        client, content="# UH-100\n\nA long description that would otherwise be echoed back "
+                        "in full on every structural listing of the tree.", kind="container")
+
+    for scope in ("containers", "all"):
+        item = next(
+            i for i in client.get(f"/api/v1/notes?scope={scope}&limit=100").json()["items"]
+            if i["id"] == container_id
+        )
+        assert "preview" in item, "the key must stay present, not be dropped"
+        assert item["preview"] == "", f"scope={scope} leaked a container preview"
+        assert item["title"] == "UH-100", "the title still identifies it"
+
+
+def test_note_previews_are_untouched(client):
+    note_id = _note(client, content="# Essay\n\nThe body of an ordinary note.")
+
+    item = next(
+        i for i in client.get("/api/v1/notes?scope=all&limit=100").json()["items"]
+        if i["id"] == note_id
+    )
+    assert "The body of an ordinary note" in item["preview"]
+
+
+def test_container_search_preview_is_still_populated(client):
+    # The empty-preview rule is for listings only. In search, the preview is
+    # the snippet showing why the row matched, which is the useful part.
+    container_id = _note(
+        client, content="# Course\n\nA seminar about zzyzxtopic and related things.",
+        kind="container")
+
+    hit = client.get("/api/v1/search?q=zzyzxtopic&scope=containers").json()["items"][0]
+    assert hit["id"] == container_id
+    assert "zzyzxtopic" in hit["preview"], "search must still show why it matched"
+
+    listed = next(
+        i for i in client.get("/api/v1/notes?scope=containers&limit=100").json()["items"]
+        if i["id"] == container_id
+    )
+    assert listed["preview"] == ""
+
+
+def test_skeleton_payload_is_materially_smaller(client):
+    # Req 7: with realistic container bodies, dropping the preview must cut
+    # the skeleton response by at least 40%.
+    body = "x" * 400
+    for i in range(50):
+        _note(client, content=f"# Container {i}\n\n{body}", kind="container")
+
+    actual = client.get("/api/v1/notes?scope=containers&limit=100").json()
+    assert actual["total"] == 50
+
+    actual_bytes = len(json.dumps(actual))
+    # What the same response would have weighed with previews restored.
+    with_previews = json.loads(json.dumps(actual))
+    for item in with_previews["items"]:
+        item["preview"] = f"# {item['title']}\n\n{body}"[:120]
+    before_bytes = len(json.dumps(with_previews))
+
+    saved = 1 - actual_bytes / before_bytes
+    assert saved >= 0.40, f"only saved {saved:.0%} ({before_bytes} -> {actual_bytes} bytes)"
+
+
+def test_no_container_item_carries_content_beyond_its_title(client):
+    # The durable form of the size assertion: regardless of percentages, a
+    # container listing must not echo any of its body back.
+    marker = "qqqdistinctivebodyqqq"
+    _note(client, content=f"# Container\n\n{marker}", kind="container")
+
+    body = client.get("/api/v1/notes?scope=all&limit=100").text
+    assert marker not in body
+
+
+# --- breadcrumb on search hits (Reqs 1, 2, 3) ------------------------------
+
+
+def _tree(client):
+    """School > UH-100 > US History Foundations, with an essay at the leaf."""
+    school = _container(client, "School")
+    uh100 = _container(client, "UH-100")
+    foundations = _container(client, "US History Foundations")
+    essay = _note(client, "# Reconstruction essay\n\nzzyzxterm midterm draft.")
+    for child, parent in ((uh100, school), (foundations, uh100), (essay, foundations)):
+        client.put(f"/api/v1/notes/{child}/parent", json={"parent_id": parent})
+    return school, uh100, foundations, essay
+
+
+def test_keyword_search_hit_carries_the_full_breadcrumb(client):
+    school, uh100, foundations, essay = _tree(client)
+
+    hit = client.get("/api/v1/search?q=zzyzxterm").json()["items"][0]
+
+    assert hit["id"] == essay
+    assert hit["kind"] == "note"
+    assert hit["parent_id"] == foundations
+    assert hit["breadcrumb"] == "School › UH-100 › US History Foundations"
+
+
+def test_hybrid_search_hit_carries_the_full_breadcrumb(client, monkeypatch):
+    import search as search_module
+
+    school, uh100, foundations, essay = _tree(client)
+    monkeypatch.setattr(search_module, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(
+        search_module, "search_vectors",
+        lambda vector, limit: [{"id": "c1", "score": 0.9, "payload": {"note_id": essay}}],
+    )
+
+    hit = client.get("/api/v1/search/hybrid?q=zzyzxterm").json()["items"][0]
+
+    assert hit["id"] == essay
+    assert hit["parent_id"] == foundations
+    assert hit["breadcrumb"] == "School › UH-100 › US History Foundations"
+
+
+def test_search_hit_for_a_top_level_note_has_an_empty_breadcrumb(client):
+    _note(client, "# Loose\n\nzzyzxterm with no container above it.")
+
+    hit = client.get("/api/v1/search?q=zzyzxterm").json()["items"][0]
+
+    assert "breadcrumb" in hit, "the key must be present, not omitted"
+    assert hit["breadcrumb"] == ""
+    assert hit["parent_id"] is None
+
+
+def test_a_searched_container_reports_the_chain_above_itself(client):
+    school, uh100, _, _ = _tree(client)
+
+    hit = client.get("/api/v1/search?q=UH-100&scope=containers").json()["items"][0]
+
+    assert hit["id"] == uh100
+    assert hit["kind"] == "container"
+    assert hit["parent_id"] == school
+    assert hit["breadcrumb"] == "School", "a container's breadcrumb excludes itself"
+
+
+def test_breadcrumb_survives_a_dangling_parent(client):
+    # parent_id has no foreign key, so this state is reachable.
+    note_id = _note(client, "# Orphan\n\nzzyzxterm here.")
+    with connect() as db:
+        db.execute("UPDATE notes SET parent_id = 'ghost' WHERE id = ?", (note_id,))
+
+    hit = client.get("/api/v1/search?q=zzyzxterm").json()["items"][0]
+
+    assert hit["breadcrumb"] == ""
+    assert hit["parent_id"] == "ghost"

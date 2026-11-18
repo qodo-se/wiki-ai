@@ -368,3 +368,71 @@ func TestSearchCommandsAcceptScopeAfterTheQuery(t *testing.T) {
 		}
 	}
 }
+
+// --- breadcrumb on search hits ---------------------------------------------
+
+func TestSearchHitDecodesTreeFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[
+			{"id":"a","title":"Reconstruction essay","path":"/","preview":"p","score":2,
+			 "created_at":"x","kind":"note","parent_id":"` + testParentID + `",
+			 "breadcrumb":"School › UH-100 › US History Foundations"}
+		],"total":1,"limit":10,"offset":0}`))
+	}))
+	defer srv.Close()
+
+	resp, err := newClient(srv.URL).search("Reconstruction", 10, 0, "")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	hit := resp.Items[0]
+	if hit.Kind != "note" {
+		t.Errorf("kind = %q, want note", hit.Kind)
+	}
+	if hit.ParentID == nil || *hit.ParentID != testParentID {
+		t.Errorf("parent_id = %v, want %s", hit.ParentID, testParentID)
+	}
+	if hit.Breadcrumb != "School › UH-100 › US History Foundations" {
+		t.Errorf("breadcrumb = %q", hit.Breadcrumb)
+	}
+}
+
+func TestSearchHitToleratesABackendWithoutTreeFields(t *testing.T) {
+	// A backend predating this change sends none of the three.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"items":[{"id":"a","title":"t","path":"/","preview":"p","score":1,"created_at":"x"}],"total":1,"limit":10,"offset":0}`))
+	}))
+	defer srv.Close()
+
+	resp, err := newClient(srv.URL).search("q", 10, 0, "")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	hit := resp.Items[0]
+	if hit.Kind != "" || hit.ParentID != nil || hit.Breadcrumb != "" {
+		t.Errorf("missing fields should stay zero-valued, got %+v", hit)
+	}
+}
+
+func TestHybridSearchHitDecodesTheBreadcrumb(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/search/hybrid" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.Write([]byte(`{"items":[{"id":"a","title":"t","path":"/","preview":"p","score":0.5,
+			"created_at":"x","kind":"note","parent_id":null,"breadcrumb":"School"}],
+			"total":1,"limit":10,"offset":0}`))
+	}))
+	defer srv.Close()
+
+	resp, err := newClient(srv.URL).hybridSearch("q", 10, 0, "")
+	if err != nil {
+		t.Fatalf("hybridSearch: %v", err)
+	}
+	if resp.Items[0].Breadcrumb != "School" {
+		t.Errorf("breadcrumb = %q, want School", resp.Items[0].Breadcrumb)
+	}
+	if resp.Items[0].ParentID != nil {
+		t.Error("a null parent_id must decode as nil")
+	}
+}

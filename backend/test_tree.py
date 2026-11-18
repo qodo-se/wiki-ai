@@ -370,3 +370,73 @@ def test_ancestors_walks_a_single_consistent_snapshot():
     _insert("note", parent_id="c")
 
     assert [x["id"] for x in tree.ancestors("note")] == ["a", "b", "c"]
+
+
+# --- breadcrumb helpers ----------------------------------------------------
+
+
+def test_breadcrumb_map_returns_only_containers_with_derived_titles():
+    _insert("box", content="# Box\n\nbody", kind=tree.KIND_CONTAINER)
+    _insert("sub", content="# Sub", kind=tree.KIND_CONTAINER, parent_id="box")
+    _insert("note", content="# Not A Container", parent_id="box")
+
+    m = tree.breadcrumb_map()
+
+    assert set(m) == {"box", "sub"}
+    assert m["box"] == ("Box", None)
+    assert m["sub"] == ("Sub", "box")
+
+
+def test_breadcrumb_joins_ancestor_titles_root_first():
+    _chain("school", "uh-100", "foundations")
+    m = tree.breadcrumb_map()
+
+    assert tree.breadcrumb_for("foundations", m) == "school › uh-100 › foundations"
+
+
+def test_breadcrumb_excludes_the_node_itself():
+    # Called with a container's own parent_id, the result is the chain ABOVE
+    # it — a container's breadcrumb never repeats its own name.
+    _chain("school", "uh-100")
+    m = tree.breadcrumb_map()
+
+    assert tree.breadcrumb_for(m["uh-100"][1], m) == "school"
+
+
+def test_breadcrumb_is_empty_string_for_a_top_level_node():
+    assert tree.breadcrumb_for(None, tree.breadcrumb_map()) == ""
+
+
+def test_breadcrumb_stops_at_a_dangling_parent():
+    # parent_id has no FK, so this state is reachable.
+    assert tree.breadcrumb_for("does-not-exist", tree.breadcrumb_map()) == ""
+
+
+def test_breadcrumb_returns_what_it_has_before_a_dangling_link():
+    _insert("real", content="# Real", kind=tree.KIND_CONTAINER, parent_id="ghost")
+    assert tree.breadcrumb_for("real", tree.breadcrumb_map()) == "Real"
+
+
+def test_breadcrumb_does_not_spin_on_a_cycle_already_in_the_data():
+    _insert("a", content="# A", kind=tree.KIND_CONTAINER)
+    _insert("b", content="# B", kind=tree.KIND_CONTAINER, parent_id="a")
+    with connect() as db:  # forge a cycle set_parent would have refused
+        db.execute("UPDATE notes SET parent_id = 'b' WHERE id = 'a'")
+
+    got = tree.breadcrumb_for("b", tree.breadcrumb_map())
+
+    assert got.count(tree.BREADCRUMB_SEPARATOR) < tree.MAX_DEPTH
+    assert set(got.split(tree.BREADCRUMB_SEPARATOR)) == {"A", "B"}
+
+
+def test_breadcrumb_is_bounded_by_max_depth():
+    deepest = _chain(*[f"c{i}" for i in range(tree.MAX_DEPTH + 10)])
+    got = tree.breadcrumb_for(deepest, tree.breadcrumb_map())
+    assert len(got.split(tree.BREADCRUMB_SEPARATOR)) == tree.MAX_DEPTH
+
+
+def test_breadcrumb_ignores_a_parent_that_is_not_a_container():
+    # Only containers are in the map, so a note somehow set as a parent ends
+    # the chain rather than appearing in it.
+    _insert("plain", content="# Plain")
+    assert tree.breadcrumb_for("plain", tree.breadcrumb_map()) == ""

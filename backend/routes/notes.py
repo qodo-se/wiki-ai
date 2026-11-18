@@ -195,7 +195,16 @@ def list_notes(
             f"SELECT COUNT(*) FROM notes WHERE {scope_predicate}", scope_params
         ).fetchone()[0]
         rows = db.execute(
-            "SELECT id, title, path, substr(content, 1, 120) AS preview, created_at, "
+            "SELECT id, title, path, "
+            # A container's preview would just be its own title line repeated
+            # plus the first words of its description -- no structural value,
+            # and it was over half the bytes of a scope=containers listing,
+            # which is the call a harness makes to recover the tree skeleton.
+            # Emitted as "" rather than dropped: the key stays present so the
+            # response shape never changes with the scope parameter, which
+            # would break the typed Go and pydantic clients.
+            "CASE WHEN kind = ? THEN '' ELSE substr(content, 1, 120) END AS preview, "
+            "created_at, "
             # The title slice is taken after trimming leading whitespace, not
             # from the same raw prefix as the preview: _derive_title uses the
             # first non-blank line wherever it occurs, so content with more
@@ -206,7 +215,7 @@ def list_notes(
             "kind, parent_id, substr(ltrim(content, ' ' || char(10) || char(13) || char(9)), 1, 120) "
             f"FROM notes WHERE {scope_predicate} "
             "ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
-            (*scope_params, limit, offset),
+            (KIND_CONTAINER, *scope_params, limit, offset),
         ).fetchall()
     # Falls back to the derived title exactly as search.py does. notes.title
     # is never written by anything, so without this every list item -- and so
