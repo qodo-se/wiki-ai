@@ -99,6 +99,14 @@ EOF
 # walk up: the containers above a note, root first
 ./wiki-cli ancestors <note-uuid>
 
+# search results show where each hit sits, so two similarly-named notes can
+# be told apart without walking up to each one
+./wiki-cli search "Reconstruction"
+#   …  Reconstruction essay       …
+#       in School › UH-100 › US History Foundations
+#   …  Reconstruction, revisited  …
+#       in Current Work
+
 # walk down one level
 ./wiki-cli children <container-uuid>
 
