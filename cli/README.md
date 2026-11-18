@@ -99,13 +99,18 @@ EOF
 # walk up: the containers above a note, root first
 ./wiki-cli ancestors <note-uuid>
 
-# search results show where each hit sits, so two similarly-named notes can
-# be told apart without walking up to each one
+# search results show where each hit sits, so two notes on the same topic
+# can be told apart without walking up to each one. Real output:
 ./wiki-cli search "Reconstruction"
-#   …  Reconstruction essay       …
-#       in School › UH-100 › US History Foundations
-#   …  Reconstruction, revisited  …
-#       in Current Work
+# db277016-…  Reconstruction essay       /   matches:2   # Reconstruction essay Argues the Compromise of 1877…
+#     in School › UH-100 › US History Foundations
+# 37492f74-…  Reconstruction, revisited  /   matches:1   # Reconstruction, revisited 2026 reading. The Compromise…
+#     in Current Work
+# showing 1-2 of 2
+#
+# One is 2018 coursework, the other is current thinking, and the breadcrumbs
+# say so without a single extra call. Notes at the top level simply have no
+# "in …" line.
 
 # walk down one level
 ./wiki-cli children <container-uuid>
