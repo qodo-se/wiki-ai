@@ -19,7 +19,7 @@ HTTP (not stdio), so it can run detached and be reached by other containers.
 | `search_containers(query, limit, offset)` | `search --scope containers` |
 | `get_note_ancestors(note_id)` | `ancestors` |
 | `get_note_children(note_id, limit, offset)` | `children` |
-| `set_note_parent(note_id, parent_id=None)` | `set-parent` |
+| `set_note_parent(note_id, parent_id)` | `set-parent` |
 | `get_config()` | `config get` |
 | `set_config(...)` | `config set` |
 | `reindex()` | `reindex` |
@@ -39,6 +39,17 @@ something called `UH-100` is uninterpretable on its own; walking up returns
 each container's prose — that UH-100 was a 2018 college course, say, making
 its notes historical rather than current — which is exactly the context a
 model needs before judging whether a note is relevant or current.
+
+`set_note_parent` requires `parent_id` — pass `null` to move a note back to the
+top level. It has no default on purpose: omitting it used to mean "clear the
+parent", so a call meant as "file this somewhere" that forgot the argument
+quietly unfiled an already-filed note.
+
+Search hits (`search_notes`, `search_notes_hybrid`, `search_containers`) carry
+`kind`, `parent_id`, and `breadcrumb` — the titles of the containers above the
+hit, root first, like `School › UH-100 › US History Foundations`, or `""` for a
+top-level note. Triage on the breadcrumb and call `get_note_ancestors` only
+when you need a container's full description rather than just its name.
 
 `list_notes(scope="containers")` returns containers with their `parent_id`, so
 the skeleton comes back without any recursive traversal. It is paged like any
