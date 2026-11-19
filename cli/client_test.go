@@ -20,7 +20,7 @@ func TestNewClientTrimsTrailingSlash(t *testing.T) {
 	defer srv.Close()
 
 	c := newClient(srv.URL + "/")
-	if _, err := c.listNotes(10, 0); err != nil {
+	if _, err := c.listNotes(10, 0, ""); err != nil {
 		t.Fatalf("listNotes: %v", err)
 	}
 	if gotPath != "/api/v1/notes" {
@@ -51,7 +51,7 @@ func TestListNotesRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	list, err := newClient(srv.URL).listNotes(5, 15)
+	list, err := newClient(srv.URL).listNotes(5, 15, "")
 	if err != nil {
 		t.Fatalf("listNotes: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestCreateNoteSendsContentAndPathAndReturnsServerID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	id, err := newClient(srv.URL).createNote("the content", "/a/b")
+	id, err := newClient(srv.URL).createNote("the content", "/a/b", "")
 	if err != nil {
 		t.Fatalf("createNote: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestCreateNoteRejectsNonUUIDServerID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := newClient(srv.URL).createNote("content", "/"); err == nil {
+	if _, err := newClient(srv.URL).createNote("content", "/", ""); err == nil {
 		t.Fatal("expected an error when the server returns a non-UUID id")
 	}
 }
@@ -563,7 +563,7 @@ func TestSearchRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := newClient(srv.URL).search("hello world", 7, 3)
+	resp, err := newClient(srv.URL).search("hello world", 7, 3, "")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -613,7 +613,7 @@ func TestHybridSearchRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := newClient(srv.URL).hybridSearch("hello world", 7, 3)
+	resp, err := newClient(srv.URL).hybridSearch("hello world", 7, 3, "")
 	if err != nil {
 		t.Fatalf("hybridSearch: %v", err)
 	}
@@ -692,7 +692,7 @@ func TestReindex(t *testing.T) {
 
 func TestTransportErrorIsReturned(t *testing.T) {
 	c := newClient("http://127.0.0.1:0")
-	if _, err := c.listNotes(1, 0); err == nil {
+	if _, err := c.listNotes(1, 0, ""); err == nil {
 		t.Fatal("expected a transport error connecting to an invalid address")
 	}
 }

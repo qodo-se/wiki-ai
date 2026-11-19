@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from embeddings import EmbeddingError
 from reindex import ReindexInProgress, reindex_notes
 from search import HybridSearchHit, SearchHit, hybrid_search_notes, keyword_matches
+from tree import Scope
 from vectorstore import VectorStoreError
 
 router = APIRouter(prefix="/api/v1/search", tags=["search"])
@@ -28,8 +29,9 @@ def search(
     q: str = Query("", description="Search query"),
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    scope: Scope = Query(Scope.notes, description="which kinds of note to search"),
 ):
-    all_hits = keyword_matches(q)
+    all_hits = keyword_matches(q, scope)
     return SearchResponse(items=all_hits[offset : offset + limit], total=len(all_hits), limit=limit, offset=offset)
 
 
@@ -38,9 +40,10 @@ def search_hybrid(
     q: str = Query("", description="Search query"),
     limit: int = Query(10, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    scope: Scope = Query(Scope.notes, description="which kinds of note to search"),
 ):
     try:
-        items, total = hybrid_search_notes(q, limit, offset)
+        items, total = hybrid_search_notes(q, limit, offset, scope)
         return HybridSearchResponse(items=items, total=total, limit=limit, offset=offset)
     except (EmbeddingError, VectorStoreError) as e:
         raise HTTPException(status_code=502, detail=str(e))

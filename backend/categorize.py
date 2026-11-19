@@ -5,6 +5,7 @@ import threading
 
 from db import connect
 from llm import LLMError, generate_text
+from tree import KIND_NOTE
 
 SEGMENT_CHARSET = re.compile(r"[^a-z0-9_-]")
 MAX_SEGMENT_LENGTH = 40
@@ -19,8 +20,15 @@ class ReorganizeInProgress(Exception):
 
 
 def _fetch_all_notes() -> dict[str, dict]:
+    # Containers are excluded: reorganize assigns `path`, and a container's
+    # place in the world is its position in the tree, not a path string. Left
+    # in, every run would keep re-filing containers into directories nothing
+    # reads, churning their updated_at for no reason.
     with connect() as db:
-        rows = db.execute("SELECT id, content, path, title FROM notes ORDER BY id").fetchall()
+        rows = db.execute(
+            "SELECT id, content, path, title FROM notes WHERE kind = ? ORDER BY id",
+            (KIND_NOTE,),
+        ).fetchall()
     return {r[0]: {"content": r[1], "path": r[2], "title": r[3]} for r in rows}
 
 

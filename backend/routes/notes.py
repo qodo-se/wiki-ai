@@ -2,9 +2,11 @@ import sqlite3
 import sys
 import uuid as uuidlib
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from categorize import ReorganizeInProgress, reorganize_notes
 from chunking import chunk_content, chunk_point_id
@@ -12,6 +14,18 @@ from db import connect
 from embeddings import EmbeddingError, embed_text
 from paths import normalize_path
 from routes.images import delete_note_images
+from search import _derive_title
+from tree import (
+    KIND_CONTAINER,
+    InvalidParent,
+    NoteNotFound,
+    Scope,
+    ancestors as tree_ancestors,
+    children as tree_children,
+    promote_children,
+    scope_sql,
+    set_parent,
+)
 from vectorstore import VectorStoreError, delete_stale_chunks, delete_vectors_for_note, upsert_vectors
 
 router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
@@ -62,6 +76,16 @@ def _delete_images(note_id: str) -> None:
 PATH_PATTERN = r"^[A-Za-z0-9 _./-]*$"
 
 
+def _has_title_line(content: str) -> bool:
+    # Asks the actual title deriver rather than approximating it with "has a
+    # non-blank line". Content of just "#" clears that lower bar but derives
+    # to "" once the heading marker is stripped, which would save exactly the
+    # unnameable container this check exists to reject.
+    from search import _derive_title
+
+    return bool(_derive_title(content).strip())
+
+
 class NoteBody(BaseModel):
     content: str
     path: str = Field(default="/", max_length=200, pattern=PATH_PATTERN)
@@ -72,12 +96,34 @@ class NoteBody(BaseModel):
         return normalize_path(v) if isinstance(v, str) else v
 
 
+class NoteCreate(NoteBody):
+    # Only create takes `kind`. Converting an existing note into a container
+    # (or back) is a different operation with different consequences — it
+    # would move the note in and out of every search result — so PUT
+    # deliberately can't do it by accident.
+    kind: Literal["note", "container"] = "note"
+
+    @model_validator(mode="after")
+    def _container_needs_a_title(self):
+        if self.kind == KIND_CONTAINER and not _has_title_line(self.content):
+            raise ValueError(
+                "a container needs a title line — its first non-blank line "
+                "becomes its name in the tree"
+            )
+        return self
+
+
 class NoteSummary(BaseModel):
     id: str
     title: str
     path: str
     preview: str
     created_at: str
+    # Carrying parent_id on every list item is what makes the whole tree
+    # skeleton fetchable in one request (list with scope=containers) instead
+    # of needing a recursive walk down from some root.
+    kind: str
+    parent_id: str | None
 
 
 class NoteMeta(BaseModel):
@@ -86,6 +132,8 @@ class NoteMeta(BaseModel):
     path: str
     created_at: str
     updated_at: str
+    kind: str
+    parent_id: str | None
 
 
 class NoteListResponse(BaseModel):
@@ -95,21 +143,99 @@ class NoteListResponse(BaseModel):
     offset: int
 
 
+class ParentBody(BaseModel):
+    # No default: a request body of {} is a 422, not a silent unfiling.
+    # Clearing a parent stays possible and stays deliberate -- it needs an
+    # explicit {"parent_id": null}. The CLI already demanded this
+    # explicitness (--parent or --clear, exactly one); this brings the HTTP
+    # and MCP surfaces in line with it.
+    parent_id: str | None
+
+
+class AncestorNode(BaseModel):
+    id: str
+    title: str
+    kind: str
+    content: str
+    content_truncated: bool
+
+
+class AncestorsResponse(BaseModel):
+    # Unpaginated on purpose: the chain is bounded by tree.MAX_DEPTH, and a
+    # caller assembling context wants all of it or none of it.
+    items: list[AncestorNode]
+
+
+class ChildSummary(BaseModel):
+    id: str
+    title: str
+    kind: str
+    preview: str
+    created_at: str
+
+
+class ChildListResponse(BaseModel):
+    items: list[ChildSummary]
+    total: int
+    limit: int
+    offset: int
+
+
 @router.get("", response_model=NoteListResponse)
-def list_notes(limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0)):
+def list_notes(
+    limit: int = Query(10, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    scope: Scope = Query(Scope.notes, description="which kinds of note to return"),
+):
+    # The predicate applies to the COUNT as well as the page: a `total` that
+    # counts containers while `items` excludes them is the same leak, just
+    # harder to notice.
+    scope_predicate, scope_params = scope_sql(scope)
     with connect() as db:
         # BEGIN so both reads share one snapshot — otherwise a concurrent
         # create/delete between the two statements can make `total` disagree
         # with `items`, producing an impossible page for the caller.
         db.execute("BEGIN")
-        total = db.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        total = db.execute(
+            f"SELECT COUNT(*) FROM notes WHERE {scope_predicate}", scope_params
+        ).fetchone()[0]
         rows = db.execute(
-            "SELECT id, title, path, substr(content, 1, 120) AS preview, created_at "
-            "FROM notes ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            "SELECT id, title, path, "
+            # A container's preview would just be its own title line repeated
+            # plus the first words of its description -- no structural value,
+            # and it was over half the bytes of a scope=containers listing,
+            # which is the call a harness makes to recover the tree skeleton.
+            # Emitted as "" rather than dropped: the key stays present so the
+            # response shape never changes with the scope parameter, which
+            # would break the typed Go and pydantic clients.
+            "CASE WHEN kind = ? THEN '' ELSE substr(content, 1, 120) END AS preview, "
+            "created_at, "
+            # The title slice is taken after trimming leading whitespace, not
+            # from the same raw prefix as the preview: _derive_title uses the
+            # first non-blank line wherever it occurs, so content with more
+            # than 120 characters of leading blank lines would slice to
+            # nothing and list the note as untitled while ancestors and
+            # children still showed its name. Trimming first keeps the slice
+            # bounded and the title identical to every other read surface.
+            # 400, not 120: _derive_title strips the heading markers and only
+            # then truncates to 120 itself, so slicing at 120 first would eat
+            # characters it would have kept and give a list item a different
+            # title than search, children and ancestors report for the same
+            # row. 400 leaves room for the markers and any leading blanks.
+            "kind, parent_id, substr(ltrim(content, ' ' || char(10) || char(13) || char(9)), 1, 400) "
+            f"FROM notes WHERE {scope_predicate} "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            (KIND_CONTAINER, *scope_params, limit, offset),
         ).fetchall()
+    # Falls back to the derived title exactly as search.py does. notes.title
+    # is never written by anything, so without this every list item -- and so
+    # every container in a scope=containers skeleton -- comes back nameless,
+    # while the same row has a title through search, children and ancestors.
     items = [
-        NoteSummary(id=r[0], title=r[1], path=r[2], preview=r[3], created_at=r[4])
+        NoteSummary(
+            id=r[0], title=r[1] or _derive_title(r[7]), path=r[2], preview=r[3],
+            created_at=r[4], kind=r[5], parent_id=r[6],
+        )
         for r in rows
     ]
     return NoteListResponse(items=items, total=total, limit=limit, offset=offset)
@@ -128,21 +254,25 @@ def get_note(uuid: str):
 def get_note_meta(uuid: str):
     with connect() as db:
         row = db.execute(
-            "SELECT id, title, path, created_at, updated_at FROM notes WHERE id = ?",
+            "SELECT id, title, path, created_at, updated_at, kind, parent_id "
+            "FROM notes WHERE id = ?",
             (uuid,),
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="note not found")
-    return NoteMeta(id=row[0], title=row[1], path=row[2], created_at=row[3], updated_at=row[4])
+    return NoteMeta(
+        id=row[0], title=row[1], path=row[2], created_at=row[3], updated_at=row[4],
+        kind=row[5], parent_id=row[6],
+    )
 
 
 @router.post("")
-def create_note(body: NoteBody):
+def create_note(body: NoteCreate):
     new_id = str(uuidlib.uuid4())
     with connect() as db:
         db.execute(
-            "INSERT INTO notes (id, content, path) VALUES (?, ?, ?)",
-            (new_id, body.content, body.path),
+            "INSERT INTO notes (id, content, path, kind) VALUES (?, ?, ?, ?)",
+            (new_id, body.content, body.path, body.kind),
         )
     _sync_embedding(new_id, body.content)
     return {"id": new_id}
@@ -151,6 +281,15 @@ def create_note(body: NoteBody):
 @router.put("/{uuid}")
 def put_note(uuid: str, body: NoteBody):
     with connect() as db:
+        existing = db.execute("SELECT kind FROM notes WHERE id = ?", (uuid,)).fetchone()
+        if existing is not None and existing[0] == KIND_CONTAINER and not _has_title_line(body.content):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "a container needs a title line — its first non-blank line "
+                    "becomes its name in the tree"
+                ),
+            )
         cursor = db.execute(
             "UPDATE notes SET content = ?, path = ?, updated_at = datetime('now') WHERE id = ?",
             (body.content, body.path, uuid),
@@ -164,11 +303,59 @@ def put_note(uuid: str, body: NoteBody):
 @router.delete("/{uuid}", status_code=204)
 def delete_note(uuid: str):
     with connect() as db:
-        cursor = db.execute("DELETE FROM notes WHERE id = ?", (uuid,))
-        if cursor.rowcount == 0:
+        # Same reason set_parent uses it: without the write lock held from the
+        # start, a concurrent move of this container between the read below
+        # and the promotion would re-home its children onto the parent it used
+        # to have rather than the one it had when it was deleted.
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT parent_id FROM notes WHERE id = ?", (uuid,)).fetchone()
+        if row is None:
             raise HTTPException(status_code=404, detail="note not found")
+        # Anything filed under this note moves up to where this note itself
+        # lived, in the same transaction as the delete — a crash between the
+        # two would otherwise leave children pointing at a row that's gone.
+        promote_children(db, uuid, row[0])
+        db.execute("DELETE FROM notes WHERE id = ?", (uuid,))
     _delete_embedding(uuid)
     _delete_images(uuid)
+
+
+@router.put("/{uuid}/parent")
+def put_note_parent(uuid: str, body: ParentBody):
+    """Set or clear a note's primary container."""
+    try:
+        set_parent(uuid, body.parent_id)
+    except NoteNotFound:
+        raise HTTPException(status_code=404, detail="note not found")
+    except InvalidParent as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"id": uuid, "parent_id": body.parent_id}
+
+
+@router.get("/{uuid}/ancestors", response_model=AncestorsResponse)
+def get_note_ancestors(uuid: str):
+    """The chain of containers this note lives under, root first."""
+    try:
+        items = tree_ancestors(uuid)
+    except NoteNotFound:
+        raise HTTPException(status_code=404, detail="note not found")
+    return AncestorsResponse(items=[AncestorNode(**a) for a in items])
+
+
+@router.get("/{uuid}/children", response_model=ChildListResponse)
+def get_note_children(
+    uuid: str,
+    limit: int = Query(10, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """One level down: what's filed directly under this note."""
+    try:
+        items, total = tree_children(uuid, limit, offset)
+    except NoteNotFound:
+        raise HTTPException(status_code=404, detail="note not found")
+    return ChildListResponse(
+        items=[ChildSummary(**c) for c in items], total=total, limit=limit, offset=offset
+    )
 
 
 @router.post("/reorganize")

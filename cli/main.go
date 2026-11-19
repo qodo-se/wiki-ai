@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 const defaultBaseURL = "http://localhost:8081"
@@ -35,6 +36,12 @@ func main() {
 		runSearch(args)
 	case "search-hybrid":
 		runHybridSearch(args)
+	case "ancestors":
+		runAncestors(args)
+	case "children":
+		runChildren(args)
+	case "set-parent":
+		runSetParent(args)
 	case "config":
 		runConfig(args)
 	case "reindex":
@@ -71,6 +78,13 @@ Commands:
                        fusion — catches notes an exact keyword match would
                        miss semantically, and vice versa; prints each hit's
                        fused RRF score
+  ancestors <uuid>     print the containers this note lives under, root
+                       first — each container's body says what it is, which
+                       is the context a note's own text usually leaves out
+  children <uuid>      list what's filed directly under this note
+  set-parent <uuid> (--parent <uuid> | --clear)
+                       file a note under a container, or move it back to the
+                       top level
   config get           print the server's current Ollama/Qdrant settings
   config set [flags]   update one or more settings (see "config set flags"
                        below); only the flags you pass are changed
@@ -84,13 +98,37 @@ Commands:
                        printing the image URL to insert into the note's
                        markdown as ![alt](url)
 
+The wiki is a tree: a container is a note that groups other notes and whose
+body describes what that grouping is. Containers are hidden from ordinary
+listing and search — pass --scope to see them.
+
 list flags:
-  --limit int    max number of notes to return per page (default 10)
-  --offset int   number of notes to skip, for paging (default 0)
+  --limit int     max number of notes to return per page (default 10)
+  --offset int    number of notes to skip, for paging (default 0)
+  --scope string  "notes" (default), "containers", or "all". Listing with
+                  --scope containers returns every container with its
+                  parent, i.e. the whole tree skeleton in one call
+
+children flags:
+  --limit int    max number of children to return per page (default 10)
+  --offset int   number of children to skip, for paging (default 0)
+
+set-parent flags:
+  --parent string  uuid of the container to file this note under
+  --clear          move the note back to the top level
+                   (pass exactly one of --parent or --clear)
 
 search / search-hybrid flags:
-  --limit int    max number of results to return per page (default 10)
-  --offset int   number of results to skip, for paging (default 0)
+  --limit int     max number of results to return per page (default 10)
+  --offset int    number of results to skip, for paging (default 0)
+  --scope string  "notes" (default), "containers", or "all"
+
+create flags:
+  --path string   note path (default "/")
+  --file string   read content from this file (default: stdin)
+  --kind string   "note" (default) or "container". A container's first
+                  non-blank line becomes its name in the tree, and its body
+                  is where you say what the grouping is
 
 config set flags:
   --ollama-url string
@@ -139,6 +177,7 @@ func runList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	limit := fs.Int("limit", 10, "max number of notes to return per page")
 	offset := fs.Int("offset", 0, "number of notes to skip (for paging)")
+	scope := addScopeFlag(fs)
 	urlFlag := addURLFlag(fs)
 	fs.Parse(args)
 	url := *urlFlag
@@ -147,13 +186,17 @@ func runList(args []string) {
 		fmt.Fprintln(os.Stderr, "error: --offset must be >= 0")
 		os.Exit(1)
 	}
+	requireValidScope(*scope)
 
-	list, err := newClient(url).listNotes(*limit, *offset)
+	list, err := newClient(url).listNotes(*limit, *offset, *scope)
 	if err != nil {
 		fail(err)
 	}
 	for _, n := range list.Items {
-		fmt.Printf("%s  %-30s %-20s %s\n", sanitizeForTerminal(n.ID), sanitizeForTerminal(n.Title), sanitizeForTerminal(n.Path), n.CreatedAt)
+		// The parent id is printed in full, not abbreviated: reconstructing the
+		// tree from `list --scope containers` means matching it against the ids
+		// in the first column, which a truncated value can't do.
+		fmt.Printf("%s  %-11s %-30s %-20s %s  parent:%s\n", sanitizeForTerminal(n.ID), sanitizeForTerminal(n.Kind), sanitizeForTerminal(n.Title), sanitizeForTerminal(n.Path), n.CreatedAt, formatParent(n.ParentID))
 	}
 
 	if list.Total == 0 {
@@ -210,22 +253,30 @@ func runMeta(args []string) {
 	fmt.Printf("path:       %s\n", sanitizeForTerminal(meta.Path))
 	fmt.Printf("created_at: %s\n", meta.CreatedAt)
 	fmt.Printf("updated_at: %s\n", meta.UpdatedAt)
+	fmt.Printf("kind:       %s\n", sanitizeForTerminal(meta.Kind))
+	fmt.Printf("parent:     %s\n", formatParent(meta.ParentID))
 }
 
 func runCreate(args []string) {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 	path := fs.String("path", "/", "note path")
 	file := fs.String("file", "", "read content from this file (default: stdin)")
+	kind := fs.String("kind", "note", `"note" or "container"`)
 	urlFlag := addURLFlag(fs)
 	fs.Parse(args)
 	url := *urlFlag
+
+	if *kind != "note" && *kind != "container" {
+		fmt.Fprintf(os.Stderr, "error: --kind must be \"note\" or \"container\", got %q\n", sanitizeForTerminal(*kind))
+		os.Exit(1)
+	}
 
 	content, err := readContent(*file)
 	if err != nil {
 		fail(err)
 	}
 
-	id, err := newClient(url).createNote(content, *path)
+	id, err := newClient(url).createNote(content, *path, *kind)
 	if err != nil {
 		fail(err)
 	}
@@ -288,11 +339,12 @@ func runSearch(args []string) {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
 	limit := fs.Int("limit", 10, "max number of results per page")
 	offset := fs.Int("offset", 0, "number of results to skip (for paging)")
+	scope := addScopeFlag(fs)
 	urlFlag := addURLFlag(fs)
-	fs.Parse(args)
+	query := parsePositional(fs, args)
 	url := *urlFlag
 
-	if fs.NArg() < 1 {
+	if query == "" {
 		fmt.Fprintln(os.Stderr, "usage: wiki-cli search <query>")
 		os.Exit(1)
 	}
@@ -301,14 +353,180 @@ func runSearch(args []string) {
 		os.Exit(1)
 	}
 
-	resp, err := newClient(url).search(fs.Arg(0), *limit, *offset)
+	requireValidScope(*scope)
+
+	resp, err := newClient(url).search(query, *limit, *offset, *scope)
 	if err != nil {
 		fail(err)
 	}
 	for _, h := range resp.Items {
 		fmt.Printf("%s  %-30s %-20s matches:%-3d %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), int(h.Score), sanitizeForTerminal(h.Preview))
+		printBreadcrumb(h)
 	}
 	printSearchPageInfo(resp, *limit)
+}
+
+// parsePositional pulls out a command's positional argument (a <uuid>, or
+// search's <query>) and lets flags sit on either side of it. Go's flag package stops parsing at the first
+// non-flag argument, so a bare fs.Parse(args) would silently drop the flags
+// in `set-parent <uuid> --parent <uuid>` — the form these commands document
+// and the natural one to type. Parsing twice (leading flags, then the
+// remainder after the positional) handles both orders. Returns "" when no
+// positional was given, leaving the usage check to the caller.
+func parsePositional(fs *flag.FlagSet, args []string) string {
+	fs.Parse(args)
+	if fs.NArg() == 0 {
+		return ""
+	}
+	positional := fs.Arg(0)
+	if rest := fs.Args()[1:]; len(rest) > 0 {
+		fs.Parse(rest)
+	}
+	return positional
+}
+
+// addScopeFlag is shared by list/search/search-hybrid so the three never
+// drift on spelling or default. Empty means "don't send one" — the server's
+// own default (notes only) then applies.
+func addScopeFlag(fs *flag.FlagSet) *string {
+	return fs.String("scope", "notes", `which kinds of note: "notes", "containers", or "all"`)
+}
+
+func requireValidScope(scope string) {
+	switch scope {
+	case "notes", "containers", "all":
+		return
+	}
+	fmt.Fprintf(os.Stderr, "error: --scope must be \"notes\", \"containers\", or \"all\", got %q\n", sanitizeForTerminal(scope))
+	os.Exit(1)
+}
+
+// printBreadcrumb shows where a hit sits in the tree, on its own indented
+// line so it never disturbs the existing single-line result format. Silent
+// for a top-level note, so output for an untreed vault is unchanged.
+func printBreadcrumb(h searchHit) {
+	if h.Breadcrumb != "" {
+		fmt.Printf("    in %s\n", sanitizeForTerminal(h.Breadcrumb))
+	}
+}
+
+func formatParent(parentID *string) string {
+	if parentID == nil || *parentID == "" {
+		return "(top level)"
+	}
+	return sanitizeForTerminal(*parentID)
+}
+
+func runAncestors(args []string) {
+	fs := flag.NewFlagSet("ancestors", flag.ExitOnError)
+	urlFlag := addURLFlag(fs)
+	noteID := parsePositional(fs, args)
+	url := *urlFlag
+
+	if noteID == "" {
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli ancestors <uuid>")
+		os.Exit(1)
+	}
+
+	resp, err := newClient(url).getNoteAncestors(requireUUID(noteID))
+	if err != nil {
+		fail(err)
+	}
+	if len(resp.Items) == 0 {
+		fmt.Println("(top level — no containers above this note)")
+		return
+	}
+	// Root first, indenting one level per step, so the shape of the chain is
+	// visible at a glance rather than having to be reconstructed. Each
+	// container's body is printed under it — that prose is the whole reason to
+	// walk up, and a bare list of titles would be no more informative than the
+	// path string this feature exists to replace.
+	for i, a := range resp.Items {
+		indent := strings.Repeat("  ", i)
+		fmt.Printf("%s%s  %s\n", indent, sanitizeForTerminal(a.ID), sanitizeForTerminal(a.Title))
+		for _, line := range strings.Split(strings.TrimRight(a.Content, "\n"), "\n") {
+			fmt.Printf("%s  | %s\n", indent, sanitizeForTerminal(line))
+		}
+		if a.ContentTruncated {
+			fmt.Printf("%s  | … (truncated)\n", indent)
+		}
+	}
+}
+
+func runChildren(args []string) {
+	fs := flag.NewFlagSet("children", flag.ExitOnError)
+	limit := fs.Int("limit", 10, "max number of children to return per page")
+	offset := fs.Int("offset", 0, "number of children to skip (for paging)")
+	urlFlag := addURLFlag(fs)
+	noteID := parsePositional(fs, args)
+	url := *urlFlag
+
+	if noteID == "" {
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli children <uuid>")
+		os.Exit(1)
+	}
+	if *offset < 0 {
+		fmt.Fprintln(os.Stderr, "error: --offset must be >= 0")
+		os.Exit(1)
+	}
+
+	resp, err := newClient(url).getNoteChildren(requireUUID(noteID), *limit, *offset)
+	if err != nil {
+		fail(err)
+	}
+	for _, c := range resp.Items {
+		fmt.Printf("%s  %-11s %-30s %s\n", sanitizeForTerminal(c.ID), sanitizeForTerminal(c.Kind), sanitizeForTerminal(c.Title), c.CreatedAt)
+	}
+	if resp.Total == 0 {
+		fmt.Println("nothing filed under this note")
+		return
+	}
+	if len(resp.Items) == 0 {
+		fmt.Printf("no children at offset %d (%d total) — try a smaller --offset\n", resp.Offset, resp.Total)
+		return
+	}
+	shownTo := resp.Offset + len(resp.Items)
+	fmt.Printf("showing %d-%d of %d\n", resp.Offset+1, shownTo, resp.Total)
+	if shownTo < resp.Total {
+		fmt.Printf("next page: --offset %d\n", resp.Offset+*limit)
+	}
+}
+
+func runSetParent(args []string) {
+	fs := flag.NewFlagSet("set-parent", flag.ExitOnError)
+	parent := fs.String("parent", "", "uuid of the container to file this note under")
+	clear := fs.Bool("clear", false, "move the note back to the top level")
+	urlFlag := addURLFlag(fs)
+	noteID := parsePositional(fs, args)
+	url := *urlFlag
+
+	if noteID == "" {
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli set-parent <uuid> (--parent <uuid> | --clear)")
+		os.Exit(1)
+	}
+	// Requiring exactly one of the two makes clearing an explicit act. A bare
+	// `set-parent <uuid>` is far more likely to be a forgotten flag than a
+	// deliberate request to unfile the note.
+	if *clear == (*parent != "") {
+		fmt.Fprintln(os.Stderr, "usage: wiki-cli set-parent <uuid> (--parent <uuid> | --clear)")
+		fmt.Fprintln(os.Stderr, "error: pass exactly one of --parent or --clear")
+		os.Exit(1)
+	}
+
+	var parentID *string
+	if !*clear {
+		validated := requireUUID(*parent)
+		parentID = &validated
+	}
+
+	if err := newClient(url).setNoteParent(requireUUID(noteID), parentID); err != nil {
+		fail(err)
+	}
+	if parentID == nil {
+		fmt.Println("moved to top level")
+		return
+	}
+	fmt.Printf("filed under %s\n", sanitizeForTerminal(*parentID))
 }
 
 func runBackup(args []string) {
@@ -357,11 +575,12 @@ func runHybridSearch(args []string) {
 	fs := flag.NewFlagSet("search-hybrid", flag.ExitOnError)
 	limit := fs.Int("limit", 10, "max number of results per page")
 	offset := fs.Int("offset", 0, "number of results to skip (for paging)")
+	scope := addScopeFlag(fs)
 	urlFlag := addURLFlag(fs)
-	fs.Parse(args)
+	query := parsePositional(fs, args)
 	url := *urlFlag
 
-	if fs.NArg() < 1 {
+	if query == "" {
 		fmt.Fprintln(os.Stderr, "usage: wiki-cli search-hybrid <query>")
 		os.Exit(1)
 	}
@@ -370,12 +589,15 @@ func runHybridSearch(args []string) {
 		os.Exit(1)
 	}
 
-	resp, err := newClient(url).hybridSearch(fs.Arg(0), *limit, *offset)
+	requireValidScope(*scope)
+
+	resp, err := newClient(url).hybridSearch(query, *limit, *offset, *scope)
 	if err != nil {
 		fail(err)
 	}
 	for _, h := range resp.Items {
 		fmt.Printf("%s  %-30s %-20s score:%.4f %s\n", sanitizeForTerminal(h.ID), sanitizeForTerminal(h.Title), sanitizeForTerminal(h.Path), h.Score, sanitizeForTerminal(h.Preview))
+		printBreadcrumb(h)
 	}
 	printSearchPageInfo(resp, *limit)
 }

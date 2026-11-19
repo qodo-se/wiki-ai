@@ -165,15 +165,19 @@ def test_semantic_search_ignores_points_from_before_chunking(monkeypatch):
 
 
 def _hit(cls, note_id, **overrides):
-    fields = {"id": note_id, "title": note_id, "path": "/", "preview": "", "created_at": "t"}
+    fields = {
+        "id": note_id, "title": note_id, "path": "/", "preview": "", "created_at": "t",
+        # Tree position defaults to "top level"; tests that care override it.
+        "kind": "note", "parent_id": None, "breadcrumb": "",
+    }
     fields.update(overrides)
     return cls(**fields)
 
 
 def test_hybrid_search_empty_query_short_circuits(monkeypatch):
     called = []
-    monkeypatch.setattr(search, "keyword_matches", lambda q: called.append("kw") or [])
-    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit: called.append("sem") or [])
+    monkeypatch.setattr(search, "keyword_matches", lambda q, scope=None: called.append("kw") or [])
+    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit, scope=None: called.append("sem") or [])
     assert search.hybrid_search_notes("   ", 10) == ([], 0)
     assert called == []
 
@@ -182,7 +186,7 @@ def test_hybrid_search_ranks_notes_found_by_both_searches_highest(monkeypatch):
     monkeypatch.setattr(
         search,
         "keyword_matches",
-        lambda q: [
+        lambda q, scope=None: [
             _hit(search.SearchHit, "kw-only", score=1),
             _hit(search.SearchHit, "both", score=1),
         ],
@@ -190,7 +194,7 @@ def test_hybrid_search_ranks_notes_found_by_both_searches_highest(monkeypatch):
     monkeypatch.setattr(
         search,
         "semantic_search_notes",
-        lambda q, limit: [
+        lambda q, limit, scope=None: [
             _hit(search.SemanticSearchHit, "both", score=0.9),
             _hit(search.SemanticSearchHit, "sem-only", score=0.5),
         ],
@@ -211,12 +215,12 @@ def test_hybrid_search_surfaces_an_exact_keyword_match_the_embedding_missed(monk
     monkeypatch.setattr(
         search,
         "keyword_matches",
-        lambda q: [_hit(search.SearchHit, "exact-match", score=1)],
+        lambda q, scope=None: [_hit(search.SearchHit, "exact-match", score=1)],
     )
     monkeypatch.setattr(
         search,
         "semantic_search_notes",
-        lambda q, limit: [_hit(search.SemanticSearchHit, f"other-{i}", score=0.9 - i / 100) for i in range(20)],
+        lambda q, limit, scope=None: [_hit(search.SemanticSearchHit, f"other-{i}", score=0.9 - i / 100) for i in range(20)],
     )
 
     hits, _ = search.hybrid_search_notes("vehicle", 10)
@@ -228,9 +232,9 @@ def test_hybrid_search_respects_limit_but_reports_the_full_total(monkeypatch):
     monkeypatch.setattr(
         search,
         "keyword_matches",
-        lambda q: [_hit(search.SearchHit, str(i), score=1) for i in range(5)],
+        lambda q, scope=None: [_hit(search.SearchHit, str(i), score=1) for i in range(5)],
     )
-    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit: [])
+    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit, scope=None: [])
 
     hits, total = search.hybrid_search_notes("q", 2)
 
@@ -242,9 +246,9 @@ def test_hybrid_search_offset_pages_into_the_fused_ranking(monkeypatch):
     monkeypatch.setattr(
         search,
         "keyword_matches",
-        lambda q: [_hit(search.SearchHit, str(i), score=1) for i in range(5)],
+        lambda q, scope=None: [_hit(search.SearchHit, str(i), score=1) for i in range(5)],
     )
-    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit: [])
+    monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit, scope=None: [])
 
     hits, total = search.hybrid_search_notes("q", limit=2, offset=2)
 
@@ -259,10 +263,10 @@ def test_hybrid_search_semantic_pool_matches_total_note_count_not_requested_limi
     for i in range(7):
         _insert_note(f"n{i}", f"content {i}")
 
-    monkeypatch.setattr(search, "keyword_matches", lambda q: [])
+    monkeypatch.setattr(search, "keyword_matches", lambda q, scope=None: [])
     captured = {}
 
-    def fake_semantic_search_notes(q, limit):
+    def fake_semantic_search_notes(q, limit, scope=None):
         captured["pool"] = limit
         return []
 
@@ -278,10 +282,10 @@ def test_hybrid_search_caps_semantic_pool_at_max_candidate_notes(monkeypatch):
     for i in range(10):
         _insert_note(f"n{i}", f"content {i}")
 
-    monkeypatch.setattr(search, "keyword_matches", lambda q: [])
+    monkeypatch.setattr(search, "keyword_matches", lambda q, scope=None: [])
     captured = {}
 
-    def fake_semantic_search_notes(q, limit):
+    def fake_semantic_search_notes(q, limit, scope=None):
         captured["pool"] = limit
         return []
 
@@ -290,3 +294,63 @@ def test_hybrid_search_caps_semantic_pool_at_max_candidate_notes(monkeypatch):
     search.hybrid_search_notes("q", 10)
 
     assert captured["pool"] == 3
+
+
+# --- ranking is unchanged by the breadcrumb work ---------------------------
+
+
+def _ranked(fn):
+    return [(h.id, h.score) for h in fn]
+
+
+def test_keyword_ranking_is_unchanged_by_tree_fields():
+    # The breadcrumb is additive metadata. If adding it ever perturbs order or
+    # scores, this pins exactly what changed.
+    _insert_note("a", "car car car", title="a")          # 3 matches
+    _insert_note("b", "car car", title="b")              # 2
+    _insert_note("c", "car", title="c", created_at="2030-01-01 00:00:00")  # 1, newest
+    _insert_note("d", "car", title="d", created_at="2020-01-01 00:00:00")  # 1, oldest
+    _insert_note("e", "nothing here", title="e")
+
+    assert _ranked(search.keyword_matches("car")) == [
+        ("a", 3), ("b", 2), ("c", 1), ("d", 1),
+    ]
+
+
+def test_keyword_ranking_identical_for_treed_and_untreed_notes():
+    # Same corpus, same scores, whether or not the notes sit in a tree.
+    _insert_note("a", "car car", title="a")
+    _insert_note("b", "car", title="b")
+    before = _ranked(search.keyword_matches("car"))
+
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO notes (id, content, kind) VALUES ('box', '# Box', 'container')"
+        )
+        conn.execute("UPDATE notes SET parent_id = 'box' WHERE id IN ('a','b')")
+
+    after = search.keyword_matches("car")
+    assert _ranked(after) == before
+    assert all(h.breadcrumb == "Box" for h in after)  # tree fields did populate
+
+
+def test_hybrid_fusion_carries_the_tree_fields_through(monkeypatch):
+    # _fuse_rrf rebuilds every hit field by field, so a forgotten line here
+    # yields correct keyword results and empty hybrid ones.
+    _insert_note("n1", "car", title="n1")
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO notes (id, content, kind) VALUES ('box', '# Box', 'container')"
+        )
+        conn.execute("UPDATE notes SET parent_id = 'box' WHERE id = 'n1'")
+    monkeypatch.setattr(search, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(
+        search, "search_vectors",
+        lambda vector, limit: [{"id": "c1", "score": 0.9, "payload": {"note_id": "n1"}}],
+    )
+
+    page, _ = search.hybrid_search_notes("car", 10)
+
+    assert page[0].kind == "note"
+    assert page[0].parent_id == "box"
+    assert page[0].breadcrumb == "Box"

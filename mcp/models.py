@@ -11,6 +11,10 @@ class NoteSummary(BaseModel):
     path: str
     preview: str
     created_at: str
+    # Every list item carries its tree position, so listing with
+    # scope="containers" returns the whole skeleton in one call.
+    kind: str = "note"
+    parent_id: str | None = None
 
 
 class NoteMeta(BaseModel):
@@ -19,6 +23,8 @@ class NoteMeta(BaseModel):
     path: str
     created_at: str
     updated_at: str
+    kind: str = "note"
+    parent_id: str | None = None
 
 
 class SearchHit(BaseModel):
@@ -28,6 +34,12 @@ class SearchHit(BaseModel):
     preview: str
     score: float
     created_at: str
+    # Tree position, so a caller can tell two same-titled hits apart without
+    # a get_note_ancestors call per result. Defaulted for the same reason
+    # NoteSummary's are: a backend predating this still parses.
+    kind: str = "note"
+    parent_id: str | None = None
+    breadcrumb: str = ""
 
 
 class NoteListResponse(BaseModel):
@@ -61,3 +73,32 @@ class ReindexResult(BaseModel):
 class UploadedImage(BaseModel):
     id: str
     url: str
+
+
+class AncestorNode(BaseModel):
+    """One container on the path from the root down to a note."""
+
+    id: str
+    title: str
+    kind: str
+    content: str
+    content_truncated: bool
+
+
+class AncestorsResponse(BaseModel):
+    items: list[AncestorNode]
+
+
+class ChildSummary(BaseModel):
+    id: str
+    title: str
+    kind: str
+    preview: str
+    created_at: str
+
+
+class ChildListResponse(BaseModel):
+    items: list[ChildSummary]
+    total: int
+    limit: int
+    offset: int
