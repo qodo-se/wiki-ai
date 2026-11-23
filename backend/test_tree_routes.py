@@ -20,6 +20,24 @@ def client():
     return TestClient(app_module.app)
 
 
+@pytest.fixture(autouse=True)
+def quiet_semantic_half(monkeypatch):
+    """Search is always hybrid now, so stub the semantic half to answer empty.
+
+    Without this the real embed_text runs, can't reach Ollama, and every
+    search below takes the degraded keyword-only path -- the assertions would
+    still pass, but they'd have quietly stopped covering a healthy request.
+    Answering with no vector hits (rather than failing) keeps the keyword half
+    driving these breadcrumb assertions exactly as it did before, while the
+    response stays non-degraded. Tests that need real semantic hits override
+    search_vectors themselves.
+    """
+    import search as search_module
+
+    monkeypatch.setattr(search_module, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(search_module, "search_vectors", lambda vector, limit: [])
+
+
 def _note(client, content="a note", **kw):
     res = client.post("/api/v1/notes", json={"content": content, **kw})
     assert res.status_code == 200, res.text
@@ -448,18 +466,22 @@ def test_keyword_search_hit_carries_the_full_breadcrumb(client):
     assert hit["breadcrumb"] == "School › UH-100 › US History Foundations"
 
 
-def test_hybrid_search_hit_carries_the_full_breadcrumb(client, monkeypatch):
+def test_a_semantic_only_hit_carries_the_full_breadcrumb(client, monkeypatch):
+    # Same assertion as the test above, but reached through the semantic half:
+    # _fuse_rrf rebuilds every hit field by field, so a field forgotten there
+    # shows up only on a hit the keyword half didn't also produce.
     import search as search_module
 
     school, uh100, foundations, essay = _tree(client)
-    monkeypatch.setattr(search_module, "embed_text", lambda q: [0.1])
     monkeypatch.setattr(
         search_module, "search_vectors",
         lambda vector, limit: [{"id": "c1", "score": 0.9, "payload": {"note_id": essay}}],
     )
 
-    hit = client.get("/api/v1/search/hybrid?q=zzyzxterm").json()["items"][0]
+    body = client.get("/api/v1/search?q=zzyzxterm").json()
+    hit = body["items"][0]
 
+    assert body["degraded"] is False
     assert hit["id"] == essay
     assert hit["parent_id"] == foundations
     assert hit["breadcrumb"] == "School › UH-100 › US History Foundations"
