@@ -108,8 +108,9 @@ day can't silently overwrite an earlier snapshot)
 This snippet only backs up the database — it does not include `/data/images`. For a
 single backup that covers both, use the app's built-in on-demand backup instead:
 **Settings → Backup** downloads a zip containing both `wiki.db` and `images/`. The MCP
-server's `create_backup` tool returns that same zip, but as bytes embedded in the tool
-response rather than a file on disk — write it out yourself if you want it as a file.
+server's `create_backup` tool returns that same zip embedded in the tool response rather
+than written to disk — base64-encoded, so turning it into a file takes a decode step (see
+below).
 
 ## Restoring a backup
 
@@ -119,9 +120,21 @@ first, before anything below:
 ```sh
 unzip wiki-backup.zip -d wiki-backup-extracted
 ```
-(If you took the backup through the MCP server's `create_backup` tool instead, that
-hands back the zip's bytes in the tool response rather than a file — save them to
-`wiki-backup.zip` first, then unzip as above.)
+If you took the backup through the MCP server's `create_backup` tool instead, it hands
+back an embedded resource rather than a file, and the zip arrives **base64-encoded** in
+that resource's `blob` field. Decode it to a file before unzipping — writing the `blob`
+text out verbatim gives you base64, not a zip, and `unzip` will reject it:
+```sh
+# response.json = the tool call's raw result object, i.e. the one with the
+# "content" array: {"content":[{"type":"resource","resource":{"blob":"..."}}]}
+python3 -c "
+import base64, json
+blob = json.load(open('response.json'))['content'][0]['resource']['blob']
+open('wiki-backup.zip','wb').write(base64.b64decode(blob))
+"
+```
+Then unzip as above. (Some MCP clients decode embedded resources for you and offer the
+attachment as a file directly — if yours saves a working zip, skip the decode.)
 
 Wherever the steps below say "the backup file", use `wiki-backup-extracted/wiki.db` —
 **never copy the zip itself over `/data/wiki.db`**, or you'll overwrite the live
