@@ -136,7 +136,11 @@ async def delete_note(note_id: str) -> str:
 async def search_notes(
     query: str, limit: int = 10, offset: int = 0, scope: str = "notes"
 ) -> SearchResponse:
-    """Keyword (whole-word match) search over notes.
+    """Search notes: keyword and semantic combined, fused by reciprocal rank
+    fusion -- catches notes an exact keyword match would miss semantically,
+    and notes a pure embedding match would bury despite containing the literal
+    query term. This is the only search there is; there is no keyword-only or
+    semantic-only variant to choose between.
 
     scope is "notes" (the default), "containers", or "all".
 
@@ -145,20 +149,13 @@ async def search_notes(
     "School > UH-100 > US History Foundations" ("" for a top-level note).
     Use the breadcrumb to tell similar-looking hits apart before deciding
     which to read; call get_note_ancestors only when you need a container's
-    full description rather than just its name."""
+    full description rather than just its name.
+
+    If degraded is true the wiki could not reach its embedding service or
+    vector store, and these results are a keyword-only ranking -- notes that
+    only match semantically are missing from them, and the scores are on a
+    different scale than a healthy search's. degraded_reason says why."""
     return await _call(client.search(query, limit, offset, scope))
-
-
-@mcp_server.tool()
-async def search_notes_hybrid(
-    query: str, limit: int = 10, offset: int = 0, scope: str = "notes"
-) -> SearchResponse:
-    """Keyword + semantic search, fused by reciprocal rank fusion -- catches
-    notes an exact keyword match would miss semantically, and vice versa.
-
-    scope is "notes" (the default), "containers", or "all". Hits carry the
-    same kind/parent_id/breadcrumb tree position as search_notes."""
-    return await _call(client.hybrid_search(query, limit, offset, scope))
 
 
 @mcp_server.tool()

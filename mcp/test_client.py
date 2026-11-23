@@ -193,22 +193,16 @@ async def test_search_error():
 
 
 @pytest.mark.asyncio
-async def test_hybrid_search_success():
+async def test_search_carries_degradation_fields_through():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/search/hybrid"
-        return json_response(200, {"items": [], "total": 0, "limit": 10, "offset": 0})
+        return json_response(200, {
+            "items": [], "total": 0, "limit": 10, "offset": 0,
+            "degraded": True, "degraded_reason": "qdrant unavailable",
+        })
 
-    result = await make_client(handler).hybrid_search("x", 10, 0)
-    assert result.total == 0
-
-
-@pytest.mark.asyncio
-async def test_hybrid_search_error():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, text="qdrant unavailable")
-
-    with pytest.raises(WikiAPIError):
-        await make_client(handler).hybrid_search("x", 10, 0)
+    result = await make_client(handler).search("x", 10, 0)
+    assert result.degraded is True
+    assert result.degraded_reason == "qdrant unavailable"
 
 
 @pytest.mark.asyncio

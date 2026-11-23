@@ -1,4 +1,4 @@
-"""Tests for search_notes and search_notes_hybrid."""
+"""Tests for search_notes (the one, always-hybrid search) and search_containers."""
 
 from __future__ import annotations
 
@@ -47,18 +47,33 @@ async def test_search_notes_error(install_client):
 
 
 @pytest.mark.asyncio
-async def test_search_notes_hybrid_success(install_client):
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/search/hybrid"
-        return httpx.Response(200, json={"items": [], "total": 0, "limit": 10, "offset": 0})
-
-    install_client(handler)
-    result = await server.search_notes_hybrid(query="x", limit=10, offset=0)
-    assert result.total == 0
+async def test_there_is_no_separate_hybrid_search_tool(install_client):
+    # The two search modes collapsed into one: search_notes IS the hybrid
+    # search, and no alias was kept behind.
+    assert not hasattr(server, "search_notes_hybrid")
 
 
 @pytest.mark.asyncio
-async def test_search_notes_hybrid_error(install_client):
-    install_client(lambda request: httpx.Response(503, text="qdrant unavailable"))
-    with pytest.raises(ToolError, match="503"):
-        await server.search_notes_hybrid(query="x", limit=10, offset=0)
+async def test_search_notes_surfaces_degradation(install_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/search"
+        return httpx.Response(200, json={
+            "items": [], "total": 0, "limit": 10, "offset": 0,
+            "degraded": True, "degraded_reason": "ollama unreachable",
+        })
+
+    install_client(handler)
+    result = await server.search_notes(query="x", limit=10, offset=0)
+    assert result.degraded is True
+    assert result.degraded_reason == "ollama unreachable"
+
+
+@pytest.mark.asyncio
+async def test_search_notes_defaults_to_not_degraded(install_client):
+    # A backend predating the degradation fields must still parse.
+    install_client(lambda request: httpx.Response(
+        200, json={"items": [], "total": 0, "limit": 10, "offset": 0}
+    ))
+    result = await server.search_notes(query="x", limit=10, offset=0)
+    assert result.degraded is False
+    assert result.degraded_reason is None

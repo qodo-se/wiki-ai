@@ -14,6 +14,7 @@ const CLS = {
     itemBody: 'flex-1 min-w-0',
     snippet: 'text-gray-600 text-sm mt-1 line-clamp-2',
     notice: 'text-center text-gray-500 py-10 px-5 bg-white rounded-lg shadow-sm',
+    degradedNotice: 'max-w-[1200px] mx-auto mb-3 px-4 py-2.5 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg',
     error: 'text-center text-red-600 py-10 px-5 bg-white rounded-lg shadow-sm',
     searchInput: 'block w-full max-w-[1200px] mx-auto mb-5 px-4 py-3 text-base bg-white border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:border-gray-500',
     editor: 'max-w-[1200px] mx-auto bg-white rounded-lg shadow-md overflow-hidden',
@@ -77,7 +78,7 @@ function parsePageParam() {
 
 // Merges `updates` (key -> { value, omit }) into the current URL's query
 // string via replaceState — never pushState, so the address bar always
-// reflects the latest page/query/mode without piling up a history entry per
+// reflects the latest page/query without piling up a history entry per
 // keystroke or page turn (confirmed with the user). A value equal to its
 // `omit` default is dropped from the URL instead of written, so `/` and
 // `/search?q=foo` stay as clean as they are today.
@@ -503,18 +504,18 @@ async function renderSearch() {
     // Restore whatever search was last reflected in the URL (direct nav,
     // reload, or a shared link) instead of always starting blank.
     const initialQuery = getQueryParam('q') || '';
-    const initialMode = getQueryParam('mode') === 'hybrid' ? 'hybrid' : 'keyword';
     const initialOffset = (parsePageParam() - 1) * 10;
+    // Search has one mode now. Drop a `mode` left over from a bookmark or a
+    // shared link written before the toggle was retired — ignoring it would
+    // leave a parameter in the URL that no longer means anything.
+    updateQuery({ mode: { value: null } });
 
     app.innerHTML = `
         <div class="${CLS.headerRow}">
             <h2 class="${CLS.h2}">Search</h2>
         </div>
-        <div class="${CLS.viewToggle}">
-            <button id="mode-keyword-btn" class="${CLS.toggleBtn} ${initialMode === 'keyword' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}">Keyword</button>
-            <button id="mode-hybrid-btn" class="${CLS.toggleBtn} ${initialMode === 'hybrid' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}">Hybrid</button>
-        </div>
         <input id="search-input" class="${CLS.searchInput}" type="search" placeholder="Search your notes…" autocomplete="off" autofocus value="${escapeHtml(initialQuery)}" />
+        <div id="search-degraded" class="${CLS.degradedNotice}" hidden></div>
         <ul id="search-results" class="${CLS.list}">
             <li class="${CLS.notice}">Type to search your notes.</li>
         </ul>
@@ -527,25 +528,25 @@ async function renderSearch() {
 
     const input = document.getElementById('search-input');
     const results = document.getElementById('search-results');
-    const keywordBtn = document.getElementById('mode-keyword-btn');
-    const hybridBtn = document.getElementById('mode-hybrid-btn');
+    const degradedNotice = document.getElementById('search-degraded');
     const prevBtn = document.getElementById('search-prev-page-btn');
     const nextBtn = document.getElementById('search-next-page-btn');
     const pageInfo = document.getElementById('search-page-info');
     let timer = null;
     let currentReqId = 0;
-    let mode = initialMode;
     let offset = 0;
     const PAGE_SIZE = 10;
 
-    const ENDPOINTS = {
-        keyword: '/api/v1/search',
-        hybrid: '/api/v1/search/hybrid',
-    };
-    // Keyword mode's score is a literal occurrence count, not a relevance
-    // score comparable across notes — only hybrid's fused score is
-    // meaningful to show as a "% match" badge.
-    const MODES_WITH_MATCH_BADGE = new Set(['hybrid']);
+    // Shown when the backend couldn't reach Ollama/Qdrant and fell back to a
+    // keyword-only ranking. There's no mode toggle to fall back to by hand
+    // any more, so this banner is the only thing telling the user their
+    // results are narrower than usual.
+    function setDegraded(isDegraded) {
+        degradedNotice.hidden = !isDegraded;
+        degradedNotice.textContent = isDegraded
+            ? 'Semantic search unavailable — showing keyword matches only.'
+            : '';
+    }
 
     // Reciprocal Rank Fusion has a fixed, known ceiling independent of any
     // particular result batch: a note ranked #1 in BOTH the keyword and
@@ -570,36 +571,32 @@ async function renderSearch() {
             ++currentReqId;
             results.innerHTML = `<li class="${CLS.notice}">Type to search your notes.</li>`;
             pageInfo.textContent = '';
+            setDegraded(false);
             prevBtn.disabled = true;
             nextBtn.disabled = true;
             if (getQueryParam('q')) {
                 // There was a real query in the URL and the user cleared it —
                 // drop everything, back to bare /search.
                 window.history.replaceState(null, '', window.location.pathname);
-            } else {
-                // Nothing was ever searched yet (e.g. toggling Hybrid before
-                // typing anything) — still reflect the mode they explicitly
-                // chose instead of silently discarding it.
-                updateQuery({ mode: { value: mode, omit: 'keyword' } });
             }
             return;
         }
         const reqId = ++currentReqId;
         try {
-            const res = await fetch(ENDPOINTS[mode] + '?q=' + encodeURIComponent(q) + `&limit=${PAGE_SIZE}&offset=${nextOffset}`);
+            const res = await fetch('/api/v1/search?q=' + encodeURIComponent(q) + `&limit=${PAGE_SIZE}&offset=${nextOffset}`);
             if (reqId !== currentReqId) return; // stale
             if (!res.ok) {
-                // Hybrid search fails hard (no silent fallback to keyword-only)
-                // when Ollama/Qdrant is down, so surface the server's actual
-                // reason plus a concrete next step instead of a bare status code.
+                // An unreachable Ollama/Qdrant no longer lands here — that
+                // degrades to keyword-only results instead — so anything that
+                // does is a real failure. Surface the server's own reason
+                // rather than a bare status code.
                 let detail = null;
                 try {
                     detail = (await res.json()).detail;
                 } catch {
                     // response body wasn't JSON — fall back to the status below
                 }
-                const hint = mode === 'hybrid' ? ' Try Keyword search instead.' : '';
-                throw new Error((detail || `HTTP ${res.status}`) + hint);
+                throw new Error(detail || `HTTP ${res.status}`);
             }
             const data = await res.json();
             if (reqId !== currentReqId) return; // stale
@@ -613,10 +610,10 @@ async function renderSearch() {
             }
 
             offset = data.offset;
+            setDegraded(data.degraded);
             updateQuery({
                 q: { value: q },
                 page: { value: Math.floor(offset / PAGE_SIZE) + 1, omit: 1 },
-                mode: { value: mode, omit: 'keyword' },
             });
             const hits = data.items;
             if (!hits.length) {
@@ -634,7 +631,7 @@ async function renderSearch() {
                         <div class="${CLS.snippet}">${escapeHtml(n.preview || '')}</div>
                     </div>
                     <div class="flex flex-col items-end gap-1 shrink-0">
-                        ${MODES_WITH_MATCH_BADGE.has(mode) ? `<span class="${CLS.matchBadge}">${matchPercent(n.score)}% match</span>` : ''}
+                        ${!data.degraded ? `<span class="${CLS.matchBadge}">${matchPercent(n.score)}% match</span>` : ''}
                         <time class="${CLS.itemTime}">${escapeHtml(formatDate(n.created_at))}</time>
                     </div>
                 </li>
@@ -649,28 +646,18 @@ async function renderSearch() {
             if (reqId !== currentReqId) return;
             results.innerHTML = `<li class="${CLS.error}">Search failed: ${escapeHtml(err.message)}</li>`;
             pageInfo.textContent = '';
+            setDegraded(false);
             prevBtn.disabled = true;
             nextBtn.disabled = true;
-            // Still reflect the query/mode that was actually attempted — not
-            // the page, since no valid page was reached.
+            // Still reflect the query that was actually attempted — not the
+            // page, since no valid page was reached.
             updateQuery({
                 q: { value: q },
                 page: { value: 1, omit: 1 },
-                mode: { value: mode, omit: 'keyword' },
             });
         }
     }
 
-    function setMode(next) {
-        if (mode === next) return;
-        mode = next;
-        keywordBtn.className = `${CLS.toggleBtn} ${mode === 'keyword' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
-        hybridBtn.className = `${CLS.toggleBtn} ${mode === 'hybrid' ? CLS.toggleBtnActive : CLS.toggleBtnInactive}`;
-        runSearch(input.value, 0); // switching search type starts over from page 1
-    }
-
-    keywordBtn.addEventListener('click', () => setMode('keyword'));
-    hybridBtn.addEventListener('click', () => setMode('hybrid'));
     prevBtn.addEventListener('click', () => runSearch(input.value, Math.max(0, offset - PAGE_SIZE)));
     nextBtn.addEventListener('click', () => runSearch(input.value, offset + PAGE_SIZE));
     input.addEventListener('input', () => {
