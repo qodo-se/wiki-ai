@@ -83,6 +83,3 @@ npm-debug.log
 # Dependencies
 pip-log.txt
 pip-delete-this-directory.txt
-
-# Go build artifacts
-cli/wiki-cli

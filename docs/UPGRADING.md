@@ -106,18 +106,23 @@ docker cp $(docker compose ps -q api):/data/backups/manual-<timestamp>.db ./wiki
 day can't silently overwrite an earlier snapshot)
 
 This snippet only backs up the database — it does not include `/data/images`. For a
-single backup that covers both, use the app's built-in on-demand backup instead
-(**Settings → Backup**, or `wiki-cli backup`), which downloads a zip containing both
-`wiki.db` and `images/`.
+single backup that covers both, use the app's built-in on-demand backup instead:
+**Settings → Backup** downloads a zip containing both `wiki.db` and `images/`. The MCP
+server's `create_backup` tool returns that same zip, but as bytes embedded in the tool
+response rather than a file on disk — write it out yourself if you want it as a file.
 
 ## Restoring a backup
 
-If you're restoring the **built-in on-demand backup** (Settings → Backup, or `wiki-cli
-backup`), it downloads as a **zip** containing `wiki.db` plus an `images/` directory —
-extract it on the host first, before anything below:
+If you're restoring the **built-in on-demand backup** (Settings → Backup), it downloads
+as a **zip** containing `wiki.db` plus an `images/` directory — extract it on the host
+first, before anything below:
 ```sh
 unzip wiki-backup.zip -d wiki-backup-extracted
 ```
+(If you took the backup through the MCP server's `create_backup` tool instead, that
+hands back the zip's bytes in the tool response rather than a file — save them to
+`wiki-backup.zip` first, then unzip as above.)
+
 Wherever the steps below say "the backup file", use `wiki-backup-extracted/wiki.db` —
 **never copy the zip itself over `/data/wiki.db`**, or you'll overwrite the live
 database with zip bytes instead of the SQLite data inside it. A pre-migration snapshot
