@@ -146,7 +146,7 @@ def test_hybrid_search_cost_stays_bounded(count_queries, monkeypatch):
         ],
     )
 
-    (page, total), log = count_queries(lambda: search.hybrid_search_notes("zzyzx", 10))
+    (page, total, _), log = count_queries(lambda: search.hybrid_search_notes("zzyzx", 10))
 
     assert total == 10
     # Scope count + keyword rows + keyword containers + semantic rows +

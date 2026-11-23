@@ -3,9 +3,9 @@ import re
 from pydantic import BaseModel
 
 from db import connect
-from embeddings import embed_text
+from embeddings import EmbeddingError, embed_text
 from tree import Scope, breadcrumb_for, breadcrumb_map, scope_sql
-from vectorstore import search_vectors
+from vectorstore import VectorStoreError, search_vectors
 
 
 class SearchHit(BaseModel):
@@ -67,10 +67,10 @@ def _build_snippet(content: str, query: str, context: int = 80) -> str:
 
 
 def keyword_matches(query: str, scope: Scope = Scope.notes) -> list[SearchHit]:
-    # Every matching note, ranked, with no pagination applied — used both by
-    # the /api/v1/search route (which also needs a total count) and by
-    # hybrid_search_notes (which wants the full candidate list to fuse), so
-    # the word-boundary matching logic lives in exactly one place.
+    # Every matching note, ranked, with no pagination applied. No longer has
+    # a route of its own — keyword-only search was retired when the two search
+    # modes collapsed into one — so this exists as the keyword half that
+    # hybrid_search_notes fuses, which wants the full candidate list anyway.
     #
     # scope defaults to notes-only: containers are structural, and a caller
     # that hasn't asked for them shouldn't have to know they exist. The
@@ -290,18 +290,21 @@ def _fuse_rrf(ranked_lists: list[list]) -> list[HybridSearchHit]:
 
 def hybrid_search_notes(
     query: str, limit: int, offset: int = 0, scope: Scope = Scope.notes
-) -> tuple[list[HybridSearchHit], int]:
+) -> tuple[list[HybridSearchHit], int, str | None]:
     # Keyword and semantic search alone each have a blind spot: a keyword
     # match misses a relevant note that doesn't use the query's exact words,
     # while a semantic match can bury a note that literally contains the
     # query term (whole-note embeddings don't privilege exact term overlap).
+    # This is now the only search behavior the app offers, on every surface.
     #
-    # Returns (page, total) rather than just a list: computing "total" by
-    # re-running the fusion would mean embedding the query a second time,
-    # which hits Ollama again for no reason — one fusion pass yields both.
+    # Returns (page, total, degraded_reason) rather than just a list:
+    # computing "total" by re-running the fusion would mean embedding the
+    # query a second time, which hits Ollama again for no reason — one fusion
+    # pass yields both. degraded_reason is None on a healthy run and carries
+    # the underlying error when the semantic half was unavailable (see below).
     q = query.strip()
     if not q:
-        return [], 0
+        return [], 0, None
 
     # Fetches a ranking over every note (capped, see above) rather than an
     # oversample scaled by the requested page, so "total" is exact and stable
@@ -319,7 +322,27 @@ def hybrid_search_notes(
         ).fetchone()[0]
     candidate_pool = min(total_notes, _MAX_HYBRID_CANDIDATE_NOTES)
 
+    # Deliberately outside the try below: a failure in the keyword half is a
+    # real bug, not a degradation path, and must propagate rather than quietly
+    # returning an empty-but-successful page.
     keyword_hits = keyword_matches(q, scope)
-    semantic_hits = semantic_search_notes(q, candidate_pool, scope)
+
+    # There is no keyword-only mode to fall back to by hand any more, so the
+    # semantic half failing can't be allowed to take search down with it:
+    # Ollama or Qdrant being unreachable degrades this to a keyword-only
+    # ranking plus a reason the caller can surface, instead of a 502.
+    degraded_reason: str | None = None
+    try:
+        semantic_hits = semantic_search_notes(q, candidate_pool, scope)
+    except (EmbeddingError, VectorStoreError) as e:
+        semantic_hits = []
+        degraded_reason = str(e)
+
+    # Fusion runs either way — over one list when degraded — so the returned
+    # hit shape and score type never vary with the semantic half's health.
+    # A single-list RRF score tops out at 1/(k+1), half the two-list ceiling,
+    # which is why a degraded ranking's scores aren't comparable to a healthy
+    # one's and callers are told via degraded_reason rather than left to infer
+    # it from the numbers.
     fused = _fuse_rrf([keyword_hits, semantic_hits])
-    return fused[offset : offset + limit], len(fused)
+    return fused[offset : offset + limit], len(fused), degraded_reason

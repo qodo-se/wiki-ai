@@ -1,9 +1,9 @@
 """Containers must never leak into ordinary note results.
 
 This is the one defect this feature genuinely can't afford, and it's the kind
-a convention doesn't catch: the scope predicate has to be applied in four
-separate query paths *and* in each one's `total`, so a single forgotten call
-site is a silent leak. These tests assert the behaviour at every public read
+a convention doesn't catch: the scope predicate has to be applied in every
+query path *and* in each one's `total`, so a single forgotten call site is a
+silent leak. These tests assert the behaviour at every public read
 surface rather than trusting that every query remembered to filter.
 
 Every test uses the distinctive token "zzyzx" so a hit can only have come from
@@ -14,6 +14,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import search as search_module
+from embeddings import EmbeddingError
+from vectorstore import VectorStoreError
 
 TOKEN = "zzyzx"
 
@@ -95,47 +97,24 @@ def test_by_path_full_set_fetch_never_sees_a_container(client, container_and_not
 
 
 # --- GET /api/v1/search ----------------------------------------------------
-
-
-def test_keyword_search_hides_containers_by_default(client, container_and_note):
-    body = client.get(f"/api/v1/search?q={TOKEN}").json()
-
-    assert body["items"] == []
-    assert body["total"] == 0, "total must exclude containers too, not just items"
-
-
-def test_keyword_search_can_ask_for_containers(client, container_and_note):
-    container_id, _ = container_and_note
-
-    body = client.get(f"/api/v1/search?q={TOKEN}&scope=containers").json()
-
-    assert [i["id"] for i in body["items"]] == [container_id]
-    assert body["total"] == 1
-
-
-def test_keyword_search_scope_all_finds_the_container(client, container_and_note):
-    container_id, _ = container_and_note
-
-    body = client.get(f"/api/v1/search?q={TOKEN}&scope=all").json()
-
-    assert [i["id"] for i in body["items"]] == [container_id]
-
-
-def test_keyword_search_rejects_an_unknown_scope(client):
-    assert client.get("/api/v1/search?q=x&scope=sideways").status_code == 422
-
-
-# --- GET /api/v1/search/hybrid ---------------------------------------------
+#
+# One route now, always hybrid, so there is one set of these rather than the
+# parallel keyword/hybrid sets this file used to carry.
 
 
 @pytest.fixture
 def fake_vectors(monkeypatch, container_and_note):
     """Makes Qdrant 'return' the container as its top semantic hit.
 
-    The semantic half can't filter in the vector store — Qdrant doesn't know
-    what kind a note is — so the filter has to hold when chunk hits are
+    The semantic half can't filter in the vector store -- Qdrant doesn't know
+    what kind a note is -- so the filter has to hold when chunk hits are
     hydrated back into rows. Forcing the container to the top of the vector
     results is the only way to prove it does.
+
+    Every route test below depends on this: without it the real embed_text
+    runs, fails to reach Ollama, and the request silently takes the degraded
+    keyword-only path -- which would make these tests pass while no longer
+    exercising the semantic half's scope filter at all.
     """
     container_id, _ = container_and_note
     monkeypatch.setattr(search_module, "embed_text", lambda q: [0.1])
@@ -149,28 +128,44 @@ def fake_vectors(monkeypatch, container_and_note):
     return container_id
 
 
-def test_hybrid_search_hides_containers_by_default(client, fake_vectors):
-    body = client.get(f"/api/v1/search/hybrid?q={TOKEN}").json()
+def test_search_hides_containers_by_default(client, fake_vectors):
+    body = client.get(f"/api/v1/search?q={TOKEN}").json()
 
+    assert body["degraded"] is False, "semantic half must be live, or this proves nothing"
     assert body["items"] == []
     assert body["total"] == 0, "total must exclude containers too, not just items"
 
 
-def test_hybrid_search_can_ask_for_containers(client, fake_vectors):
-    body = client.get(f"/api/v1/search/hybrid?q={TOKEN}&scope=containers").json()
+def test_search_can_ask_for_containers(client, fake_vectors):
+    body = client.get(f"/api/v1/search?q={TOKEN}&scope=containers").json()
 
+    assert body["degraded"] is False
     assert [i["id"] for i in body["items"]] == [fake_vectors]
     assert body["total"] == 1
 
 
-def test_hybrid_search_scope_all_finds_the_container(client, fake_vectors):
-    body = client.get(f"/api/v1/search/hybrid?q={TOKEN}&scope=all").json()
+def test_search_scope_all_finds_the_container(client, fake_vectors):
+    body = client.get(f"/api/v1/search?q={TOKEN}&scope=all").json()
 
+    assert body["degraded"] is False
     assert fake_vectors in [i["id"] for i in body["items"]]
 
 
-def test_hybrid_search_rejects_an_unknown_scope(client):
-    assert client.get("/api/v1/search/hybrid?q=x&scope=sideways").status_code == 422
+def test_search_rejects_an_unknown_scope(client):
+    assert client.get("/api/v1/search?q=x&scope=sideways").status_code == 422
+
+
+def test_the_removed_hybrid_route_is_gone(client):
+    # The two modes collapsed into one; /hybrid must not linger as an alias.
+    # Asserted against the route table rather than a request's status code:
+    # app.py ends in a catch-all that serves the SPA shell for anything
+    # unmatched, so a retired API path never actually produces a 404.
+    import app as app_module
+
+    search_paths = {
+        r.path for r in app_module.app.routes if r.path.startswith("/api/v1/search")
+    }
+    assert search_paths == {"/api/v1/search", "/api/v1/search/reindex"}
 
 
 # --- the semantic half specifically ----------------------------------------
@@ -225,3 +220,57 @@ def test_semantic_half_still_honours_limit(monkeypatch, client):
     )
 
     assert len(search_module.semantic_search_notes(TOKEN, 2)) == 2
+
+
+# --- degradation at the route level ----------------------------------------
+
+
+def _raiser(exc):
+    def raise_it(*args, **kwargs):
+        raise exc
+
+    return raise_it
+
+
+def test_search_route_degrades_instead_of_502_when_ollama_is_down(client, container_and_note, monkeypatch):
+    _, note_id = container_and_note
+    client.post("/api/v1/notes", json={"content": f"an ordinary note about {TOKEN}"})
+    monkeypatch.setattr(search_module, "embed_text", _raiser(EmbeddingError("ollama unreachable")))
+
+    res = client.get(f"/api/v1/search?q={TOKEN}")
+
+    assert res.status_code == 200, "a dead semantic half must not take search down"
+    body = res.json()
+    assert body["degraded"] is True
+    assert body["degraded_reason"] == "ollama unreachable"
+    assert len(body["items"]) == 1, "keyword results still come back while degraded"
+
+
+def test_search_route_degrades_when_qdrant_is_down(client, container_and_note, monkeypatch):
+    client.post("/api/v1/notes", json={"content": f"an ordinary note about {TOKEN}"})
+    monkeypatch.setattr(search_module, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(search_module, "search_vectors", _raiser(VectorStoreError("qdrant down")))
+
+    body = client.get(f"/api/v1/search?q={TOKEN}").json()
+
+    assert body["degraded"] is True
+    assert body["degraded_reason"] == "qdrant down"
+
+
+def test_a_degraded_search_still_hides_containers(client, container_and_note, monkeypatch):
+    # The scope predicate lives in the keyword half too, so it must hold on
+    # the degraded path as well -- not just when fusion has both lists.
+    monkeypatch.setattr(search_module, "embed_text", _raiser(EmbeddingError("ollama unreachable")))
+
+    body = client.get(f"/api/v1/search?q={TOKEN}").json()
+
+    assert body["degraded"] is True
+    assert body["items"] == []
+    assert body["total"] == 0
+
+
+def test_a_healthy_search_reports_degraded_false(client, fake_vectors):
+    body = client.get(f"/api/v1/search?q={TOKEN}&scope=all").json()
+
+    assert body["degraded"] is False
+    assert body["degraded_reason"] is None

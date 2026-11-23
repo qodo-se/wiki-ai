@@ -1,5 +1,9 @@
+import pytest
+
 import db
 import search
+from embeddings import EmbeddingError
+from vectorstore import VectorStoreError
 
 
 def _insert_note(note_id, content, path="/", title="", created_at=None):
@@ -178,7 +182,7 @@ def test_hybrid_search_empty_query_short_circuits(monkeypatch):
     called = []
     monkeypatch.setattr(search, "keyword_matches", lambda q, scope=None: called.append("kw") or [])
     monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit, scope=None: called.append("sem") or [])
-    assert search.hybrid_search_notes("   ", 10) == ([], 0)
+    assert search.hybrid_search_notes("   ", 10) == ([], 0, None)
     assert called == []
 
 
@@ -200,12 +204,13 @@ def test_hybrid_search_ranks_notes_found_by_both_searches_highest(monkeypatch):
         ],
     )
 
-    hits, total = search.hybrid_search_notes("q", 10)
+    hits, total, degraded = search.hybrid_search_notes("q", 10)
 
     ids = [h.id for h in hits]
     assert ids[0] == "both"  # ranked in both lists beats ranking #1 in only one
     assert set(ids) == {"kw-only", "both", "sem-only"}
     assert total == 3
+    assert degraded is None  # both halves answered -- nothing to report
 
 
 def test_hybrid_search_surfaces_an_exact_keyword_match_the_embedding_missed(monkeypatch):
@@ -223,7 +228,7 @@ def test_hybrid_search_surfaces_an_exact_keyword_match_the_embedding_missed(monk
         lambda q, limit, scope=None: [_hit(search.SemanticSearchHit, f"other-{i}", score=0.9 - i / 100) for i in range(20)],
     )
 
-    hits, _ = search.hybrid_search_notes("vehicle", 10)
+    hits, _, _ = search.hybrid_search_notes("vehicle", 10)
 
     assert "exact-match" in [h.id for h in hits]
 
@@ -236,7 +241,7 @@ def test_hybrid_search_respects_limit_but_reports_the_full_total(monkeypatch):
     )
     monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit, scope=None: [])
 
-    hits, total = search.hybrid_search_notes("q", 2)
+    hits, total, _ = search.hybrid_search_notes("q", 2)
 
     assert len(hits) == 2
     assert total == 5  # the full fused set, not just the returned page
@@ -250,7 +255,7 @@ def test_hybrid_search_offset_pages_into_the_fused_ranking(monkeypatch):
     )
     monkeypatch.setattr(search, "semantic_search_notes", lambda q, limit, scope=None: [])
 
-    hits, total = search.hybrid_search_notes("q", limit=2, offset=2)
+    hits, total, _ = search.hybrid_search_notes("q", limit=2, offset=2)
 
     assert [h.id for h in hits] == ["2", "3"]
     assert total == 5
@@ -349,8 +354,81 @@ def test_hybrid_fusion_carries_the_tree_fields_through(monkeypatch):
         lambda vector, limit: [{"id": "c1", "score": 0.9, "payload": {"note_id": "n1"}}],
     )
 
-    page, _ = search.hybrid_search_notes("car", 10)
+    page, _, _ = search.hybrid_search_notes("car", 10)
 
     assert page[0].kind == "note"
     assert page[0].parent_id == "box"
     assert page[0].breadcrumb == "Box"
+
+
+# --- degradation when the semantic half is unavailable ---------------------
+#
+# With keyword-only mode retired there is no manual fallback left, so an
+# unreachable Ollama/Qdrant must downgrade the ranking rather than take search
+# down. These pin that the downgrade happens, is reported, and is scoped to
+# the semantic half only.
+
+
+def _raiser(exc):
+    def raise_it(*args, **kwargs):
+        raise exc
+
+    return raise_it
+
+
+def test_hybrid_search_degrades_to_keyword_when_embedding_fails(monkeypatch):
+    _insert_note("n1", "Car trouble again.", title="n1")
+    monkeypatch.setattr(search, "embed_text", _raiser(EmbeddingError("ollama unreachable")))
+
+    hits, total, degraded_reason = search.hybrid_search_notes("car", 10)
+
+    assert [h.id for h in hits] == ["n1"], "keyword hits must survive the semantic failure"
+    assert total == 1
+    assert degraded_reason == "ollama unreachable"
+
+
+def test_hybrid_search_degrades_to_keyword_when_the_vector_store_fails(monkeypatch):
+    _insert_note("n1", "Car trouble again.", title="n1")
+    monkeypatch.setattr(search, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(search, "search_vectors", _raiser(VectorStoreError("qdrant down")))
+
+    hits, total, degraded_reason = search.hybrid_search_notes("car", 10)
+
+    assert [h.id for h in hits] == ["n1"]
+    assert total == 1
+    assert degraded_reason == "qdrant down"
+
+
+def test_hybrid_search_reports_no_degradation_on_a_healthy_run(monkeypatch):
+    _insert_note("n1", "Car trouble again.", title="n1")
+    monkeypatch.setattr(search, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(
+        search, "search_vectors",
+        lambda vector, limit: [{"id": "c1", "score": 0.9, "payload": {"note_id": "n1"}}],
+    )
+
+    hits, _, degraded_reason = search.hybrid_search_notes("car", 10)
+
+    assert [h.id for h in hits] == ["n1"]
+    assert degraded_reason is None
+
+
+def test_a_keyword_half_failure_is_not_treated_as_degradation(monkeypatch):
+    # A broken keyword half is a bug, not an unreachable dependency — it must
+    # propagate rather than quietly returning a "successful" degraded page.
+    monkeypatch.setattr(search, "keyword_matches", _raiser(RuntimeError("boom")))
+    monkeypatch.setattr(search, "embed_text", lambda q: [0.1])
+    monkeypatch.setattr(search, "search_vectors", lambda vector, limit: [])
+
+    with pytest.raises(RuntimeError, match="boom"):
+        search.hybrid_search_notes("car", 10)
+
+
+def test_an_unrelated_semantic_exception_still_propagates(monkeypatch):
+    # Only EmbeddingError/VectorStoreError mean "dependency unavailable".
+    # Anything else from the semantic half is a real bug and must not be
+    # silently flattened into a degraded result.
+    monkeypatch.setattr(search, "embed_text", _raiser(ValueError("not a dependency problem")))
+
+    with pytest.raises(ValueError, match="not a dependency problem"):
+        search.hybrid_search_notes("car", 10)
