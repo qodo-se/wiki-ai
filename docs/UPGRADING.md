@@ -55,8 +55,9 @@ produces a different vector *dimension*:
   results, but nothing errors. New notes created or edited after the change are
   unaffected, since they're always embedded fresh.
 - **Different dimension** — loud. Qdrant rejects both searches and new vector writes
-  against the mismatched collection, so hybrid search starts returning errors
-  immediately, and new/edited notes save fine but silently get no vector (logged as a
+  against the mismatched collection, so every search immediately falls back to a
+  keyword-only ranking and reports itself as `degraded` ("Semantic search unavailable"
+  in the UI), and new/edited notes save fine but silently get no vector (logged as a
   server-side warning) until you reindex. Reindexing fixes this immediately: it drops
   and recreates the collection from scratch, so it never hits the mismatch itself.
 

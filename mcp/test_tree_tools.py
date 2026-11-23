@@ -258,18 +258,14 @@ async def test_create_note_surfaces_a_rejected_container(install_client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool,path", [
-    (server.search_notes, "/api/v1/search"),
-    (server.search_notes_hybrid, "/api/v1/search/hybrid"),
-])
-async def test_search_tools_pass_scope_through(install_client, tool, path):
+async def test_search_notes_passes_scope_through(install_client):
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == path
+        assert request.url.path == "/api/v1/search"
         assert request.url.params["scope"] == "all"
         return httpx.Response(200, json={"items": [], "total": 0, "limit": 10, "offset": 0})
 
     install_client(handler)
-    await tool(query="x", scope="all")
+    await server.search_notes(query="x", scope="all")
 
 
 # --- breadcrumb on search hits ---------------------------------------------
@@ -295,21 +291,6 @@ async def test_search_hits_carry_the_breadcrumb(install_client):
     assert hit.kind == "note"
     assert hit.parent_id == PARENT_ID
     assert hit.breadcrumb == "School › UH-100 › US History Foundations"
-
-
-@pytest.mark.asyncio
-async def test_hybrid_search_hits_carry_the_breadcrumb(install_client):
-    install_client(lambda request: httpx.Response(200, json={
-        "items": [{
-            "id": VALID_ID, "title": "t", "path": "/", "preview": "p",
-            "score": 0.5, "created_at": "x", "kind": "note",
-            "parent_id": PARENT_ID, "breadcrumb": "School › UH-100",
-        }],
-        "total": 1, "limit": 10, "offset": 0,
-    }))
-
-    got = await server.search_notes_hybrid(query="q")
-    assert got.items[0].breadcrumb == "School › UH-100"
 
 
 @pytest.mark.asyncio

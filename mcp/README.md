@@ -15,9 +15,8 @@ containers.
 | `create_note(content, path, kind)` | Create a note or container |
 | `update_note(note_id, content, path=None)` | Update an existing note |
 | `delete_note(note_id)` | Delete a note |
-| `search_notes(query, limit, offset, scope)` | Keyword (whole-word) search |
-| `search_notes_hybrid(query, limit, offset, scope)` | Keyword + semantic, RRF-fused |
-| `search_containers(query, limit, offset)` | Search containers only |
+| `search_notes(query, limit, offset, scope)` | Keyword + semantic, RRF-fused |
+| `search_containers(query, limit, offset)` | Search containers only (same fused ranking) |
 | `get_note_ancestors(note_id)` | The containers a note lives under, root first |
 | `get_note_children(note_id, limit, offset)` | What's filed directly under a note |
 | `set_note_parent(note_id, parent_id)` | File a note under a container, or unfile it |
@@ -46,7 +45,15 @@ top level. It has no default on purpose: omitting it used to mean "clear the
 parent", so a call meant as "file this somewhere" that forgot the argument
 quietly unfiled an already-filed note.
 
-Search hits (`search_notes`, `search_notes_hybrid`, `search_containers`) carry
+Search is always keyword *and* semantic, fused by reciprocal rank fusion —
+there is one search, with no keyword-only or semantic-only variant to pick
+between. If the wiki can't reach its embedding service or vector store, a
+search still answers with a keyword-only ranking and sets `degraded` (with a
+`degraded_reason`) on the response rather than failing; notes that only match
+semantically are missing from such results, and their scores sit on a
+different scale than a healthy search's.
+
+Search hits (`search_notes`, `search_containers`) carry
 `kind`, `parent_id`, and `breadcrumb` — the titles of the containers above the
 hit, root first, like `School › UH-100 › US History Foundations`, or `""` for a
 top-level note. Triage on the breadcrumb and call `get_note_ancestors` only

@@ -124,16 +124,6 @@ class WikiClient:
         )
         return SearchResponse.model_validate(resp.json())
 
-    async def hybrid_search(
-        self, query: str, limit: int, offset: int, scope: str | None = None
-    ) -> SearchResponse:
-        resp = await self._request(
-            "GET",
-            "/api/v1/search/hybrid",
-            params=_with_scope({"q": query, "limit": limit, "offset": offset}, scope),
-        )
-        return SearchResponse.model_validate(resp.json())
-
     async def get_note_ancestors(self, note_id: str) -> AncestorsResponse:
         note_id = _require_valid_note_id(note_id)
         resp = await self._request("GET", f"/api/v1/notes/{note_id}/ancestors")

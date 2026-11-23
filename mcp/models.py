@@ -54,6 +54,12 @@ class SearchResponse(BaseModel):
     total: int
     limit: int
     offset: int
+    # True when the backend could not reach Ollama/Qdrant and these results
+    # are a keyword-only ranking rather than the usual fused one. Defaulted
+    # for the same reason SearchHit's tree fields are: a backend predating
+    # this still parses.
+    degraded: bool = False
+    degraded_reason: str | None = None
 
 
 class AppConfig(BaseModel):
