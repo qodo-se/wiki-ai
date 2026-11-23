@@ -1,30 +1,31 @@
 # wiki-mcp
 
-An MCP server exposing wiki-ai's HTTP API as tools, 1:1 with [`wiki-cli`](../cli)'s
-command set. Built on the official `mcp` Python SDK, served over streamable
-HTTP (not stdio), so it can run detached and be reached by other containers.
+An MCP server exposing wiki-ai's HTTP API as tools — the supported client for
+the `/api/v1` surface. Built on the official `mcp` Python SDK, served over
+streamable HTTP (not stdio), so it can run detached and be reached by other
+containers.
 
 ## Tools
 
-| Tool | wiki-cli equivalent |
+| Tool | What it does |
 |---|---|
-| `list_notes(limit, offset, scope)` | `list` |
-| `get_note(note_id)` | `get` |
-| `get_note_meta(note_id)` | `meta` |
-| `create_note(content, path, kind)` | `create` |
-| `update_note(note_id, content, path=None)` | `update` |
-| `delete_note(note_id)` | `delete` |
-| `search_notes(query, limit, offset, scope)` | `search` |
-| `search_notes_hybrid(query, limit, offset, scope)` | `search-hybrid` |
-| `search_containers(query, limit, offset)` | `search --scope containers` |
-| `get_note_ancestors(note_id)` | `ancestors` |
-| `get_note_children(note_id, limit, offset)` | `children` |
-| `set_note_parent(note_id, parent_id)` | `set-parent` |
-| `get_config()` | `config get` |
-| `set_config(...)` | `config set` |
-| `reindex()` | `reindex` |
-| `create_backup()` | `backup` |
-| `upload_image(note_id, filename, content_base64)` | `upload-image` |
+| `list_notes(limit, offset, scope)` | List notes, newest first |
+| `get_note(note_id)` | A note's raw markdown |
+| `get_note_meta(note_id)` | A note's title, path, timestamps |
+| `create_note(content, path, kind)` | Create a note or container |
+| `update_note(note_id, content, path=None)` | Update an existing note |
+| `delete_note(note_id)` | Delete a note |
+| `search_notes(query, limit, offset, scope)` | Keyword (whole-word) search |
+| `search_notes_hybrid(query, limit, offset, scope)` | Keyword + semantic, RRF-fused |
+| `search_containers(query, limit, offset)` | Search containers only |
+| `get_note_ancestors(note_id)` | The containers a note lives under, root first |
+| `get_note_children(note_id, limit, offset)` | What's filed directly under a note |
+| `set_note_parent(note_id, parent_id)` | File a note under a container, or unfile it |
+| `get_config()` | The server's Ollama/Qdrant settings |
+| `set_config(...)` | Update one or more of those settings |
+| `reindex()` | Drop and re-embed every semantic search vector |
+| `create_backup()` | Trigger a server-side backup and return the zip |
+| `upload_image(note_id, filename, content_base64)` | Attach an image to a note |
 
 ### The knowledge tree
 
@@ -56,9 +57,8 @@ the skeleton comes back without any recursive traversal. It is paged like any
 other listing (default limit 10, maximum 100), so pass a large limit and page
 with offset until you have `total` items.
 
-Two tools deliberately don't take a local filesystem path the way their CLI
-equivalent does, since this server may run in a container with no access to
-whatever filesystem is calling it:
+Two tools deliberately don't take a local filesystem path, since this server
+may run in a container with no access to whatever filesystem is calling it:
 
 - `create_backup` returns the zip (database snapshot + every note's images)
   embedded directly in the tool response, rather than writing it to a

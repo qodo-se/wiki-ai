@@ -146,9 +146,7 @@ class NoteListResponse(BaseModel):
 class ParentBody(BaseModel):
     # No default: a request body of {} is a 422, not a silent unfiling.
     # Clearing a parent stays possible and stays deliberate -- it needs an
-    # explicit {"parent_id": null}. The CLI already demanded this
-    # explicitness (--parent or --clear, exactly one); this brings the HTTP
-    # and MCP surfaces in line with it.
+    # explicit {"parent_id": null}.
     parent_id: str | None
 
 

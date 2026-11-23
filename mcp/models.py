@@ -1,4 +1,4 @@
-"""Pydantic models for the wiki API's JSON shapes, mirroring cli/client.go's structs."""
+"""Pydantic models for the wiki API's JSON shapes."""
 
 from __future__ import annotations
 

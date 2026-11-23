@@ -1,4 +1,4 @@
-"""Async HTTP client for wiki-ai's /api/v1 API, mirroring cli/client.go's endpoint set."""
+"""Async HTTP client for wiki-ai's /api/v1 API."""
 
 from __future__ import annotations
 
@@ -21,16 +21,14 @@ from models import (
 DEFAULT_TIMEOUT = httpx.Timeout(10.0)
 # Backup, reindex, and image upload each scale with database/file size (this
 # app puts no cap on either), so a fixed short deadline could abort a
-# legitimately still-running request instead of a genuinely hung one -- same
-# reasoning cli/client.go uses its separate, timeout-less backupHTTP client for.
+# legitimately still-running request instead of a genuinely hung one.
 LONG_TIMEOUT = None
 
-# Mirrors cli/validate.go's uuidPattern/requireUUID: every note id the backend
-# hands out is a UUID, and every note id this client is given ends up
-# interpolated straight into a request path. Rejecting anything else here --
-# before it reaches httpx -- is what stops a stray "?", "#", or "/" in a
-# caller-supplied id from being read as a query string, fragment, or path
-# separator instead of literal id characters.
+# Every note id the backend hands out is a UUID, and every note id this client
+# is given ends up interpolated straight into a request path. Rejecting
+# anything else here -- before it reaches httpx -- is what stops a stray "?",
+# "#", or "/" in a caller-supplied id from being read as a query string,
+# fragment, or path separator instead of literal id characters.
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
@@ -179,13 +177,13 @@ class WikiClient:
         return ReindexResult.model_validate(resp.json())
 
     # create_backup triggers a fresh server-side snapshot and immediately
-    # downloads it, combining what the CLI does as two client-side steps
-    # (trigger, then download) into one call -- there's no use case for
-    # triggering without retrieving, or retrieving without a fresh trigger.
+    # downloads it, combining the API's two steps (trigger, then download)
+    # into one call -- there's no use case for triggering without retrieving,
+    # or retrieving without a fresh trigger.
     #
     # The trigger's snapshot_id is passed through to the download as a query
     # param so the server can detect if some other trigger (another MCP call,
-    # the CLI, a future scheduled job) has overwritten the single backup file
+    # a future scheduled job) has overwritten the single backup file
     # in between -- if it has, the server responds 409 (surfaced by _request
     # as WikiAPIError, then wrapped into a clean ToolError by server.py's
     # _call(), same as any other failure) instead of silently handing back a

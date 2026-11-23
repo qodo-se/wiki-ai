@@ -1,9 +1,8 @@
-"""MCP server exposing wiki-ai's HTTP API as tools -- a 1:1 mirror of wiki-cli's
-command set, wrapping the same /api/v1 endpoints.
+"""MCP server exposing wiki-ai's HTTP API as tools, wrapping the /api/v1
+endpoints.
 
 Config (all via environment):
-  WIKI_URL   base URL of the wiki API (default http://localhost:8081, matching
-             wiki-cli's own default/override)
+  WIKI_URL   base URL of the wiki API (default http://localhost:8081)
   MCP_HOST   interface this server binds to (default 0.0.0.0)
   MCP_PORT   port this server listens on (default 8082)
 """
@@ -39,8 +38,7 @@ mcp_server = MCPServer(
     name="wiki-ai",
     instructions=(
         "Tools for reading, searching, and managing notes in a self-hosted "
-        "wiki-ai instance. Mirrors the wiki-cli command set 1:1 against the "
-        "same /api/v1 HTTP API.\n\n"
+        "wiki-ai instance, backed by its /api/v1 HTTP API.\n\n"
         "Notes are organized into a tree. A container is a note that groups "
         "other notes and whose body explains what that grouping is; an "
         "ordinary note can sit under one container. Containers are kept out "
@@ -58,7 +56,7 @@ client = WikiClient(WIKI_URL)
 async def _call(coro):
     """Awaits a client call, turning every failure a caller can't do anything
     about into a clean ToolError (is_error=True with a message) instead of an
-    unhandled exception -- mirrors wiki-cli's apiError formatting. Covers:
+    unhandled exception. Covers:
     WikiAPIError (the backend responded, just not with success), ValueError
     (a request was rejected before it was even sent, e.g. a malformed note
     id), and httpx.HTTPError (no response came back at all -- the backend was
@@ -117,9 +115,8 @@ async def create_note(content: str, path: str = "/", kind: str = "note") -> str:
 @mcp_server.tool()
 async def update_note(note_id: str, content: str, path: str | None = None) -> str:
     """Update an existing note's content. If path is omitted, the note's
-    current path is kept unchanged (fetches it first), matching wiki-cli's
-    update command -- this never creates a note; it 404s if note_id doesn't
-    already exist."""
+    current path is kept unchanged (fetches it first) -- this never creates a
+    note; it 404s if note_id doesn't already exist."""
     note_path = path
     if note_path is None:
         meta = await _call(client.get_note_meta(note_id))
@@ -274,9 +271,8 @@ async def create_backup() -> list[types.ContentBlock]:
 async def upload_image(note_id: str, filename: str, content_base64: str) -> UploadedImage:
     """Upload base64-encoded file content as an image attached to a note,
     returning its id and the URL to insert into the note's markdown as
-    ![alt](url). Takes content rather than a local path (unlike wiki-cli's
-    upload-image flag) since this server may run in a container with no
-    access to the caller's filesystem."""
+    ![alt](url). Takes content rather than a local path, since this server may
+    run in a container with no access to the caller's filesystem."""
     try:
         data = base64.b64decode(content_base64, validate=True)
     except binascii.Error as e:
